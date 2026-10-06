@@ -31,7 +31,7 @@ export class OpenAiProvider implements LlmProvider {
         input: [{ role: 'user', content: input }], max_output_tokens: 6000,
         text: { format: { type: 'json_schema', name: 'pr_review', strict: true, schema } } })
     });
-    if (!response.ok) throw new Error(`LLM HTTP ${response.status}`);
+    if (!response.ok) throw await httpError('LLM', response);
     const result = await response.json() as { status?: string; output?: {
       type: string; content?: { type: string; text?: string }[] }[] };
     if (result.status !== 'completed') throw new Error('LLM did not complete');
@@ -112,10 +112,57 @@ function required(name: string): string {
   if (!value) throw new Error(`Missing ${name}`);
   return value;
 }
+
+function environmentSecrets(): string[] {
+  return Object.entries(process.env).filter(([key]) => /TOKEN|SECRET|PASSWORD|KEY/i.test(key))
+    .map(([, value]) => value ?? '').filter(Boolean);
+}
+
+// Read only diagnostic fields, never log complete responses, headers, or requests.
+export async function httpError(service: string, response: Response): Promise<Error> {
+  const error = new Error(`${service} HTTP ${response.status} ${response.statusText}`);
+  Object.assign(error, { status: response.status });
+  try {
+    const body: unknown = await response.json();
+    if (body && typeof body === 'object') {
+      const root = body as Record<string, unknown>;
+      const detail = root.error && typeof root.error === 'object'
+        ? root.error as Record<string, unknown> : root;
+      if (typeof detail.message === 'string') error.message += `: ${detail.message}`;
+      for (const field of ['code', 'type'] as const)
+        if (typeof detail[field] === 'string' || typeof detail[field] === 'number')
+          Object.assign(error, { [field]: detail[field] });
+    }
+  } catch { /* Preserve HTTP status when the response is not JSON. */ }
+  return error;
+}
+
+export function formatError(error: unknown, secrets = environmentSecrets()): string {
+  const parts: string[] = [];
+  let current = error;
+  // Fetch network failures often put the useful code and message in cause.
+  for (let depth = 0; depth < 4 && current !== undefined; depth++) {
+    if (!current || typeof current !== 'object') {
+      parts.push(typeof current === 'string' ? current : 'Unknown error');
+      break;
+    }
+    const detail = current as Record<string, unknown>;
+    parts.push(typeof detail.message === 'string' ? detail.message : 'Unknown error');
+    for (const field of ['status', 'code', 'type'] as const)
+      if (typeof detail[field] === 'string' || typeof detail[field] === 'number')
+        parts.push(`${field}: ${detail[field]}`);
+    current = detail.cause;
+  }
+  const variants = secrets.filter(Boolean).flatMap(secret => [secret, encodeURIComponent(secret),
+    JSON.stringify(secret).slice(1, -1)]);
+  return redact(parts.join('; '), variants)
+    .replace(/\bBearer\s+\S+/gi, 'Bearer [REDACTED]')
+    .replace(/[\r\n\x00-\x1f\x7f]/g, ' ').slice(0, 4000);
+}
+
 export async function main() {
   const token = required('GITHUB_TOKEN'), apiKey = required('OPENAI_API_KEY');
-  const secrets = Object.entries(process.env).filter(([key]) => /TOKEN|SECRET|PASSWORD|KEY/i.test(key))
-    .map(([, value]) => value ?? '');
+  const secrets = environmentSecrets();
   const event = JSON.parse(await readFile(required('GITHUB_EVENT_PATH'), 'utf8'));
   if (process.env.GITHUB_EVENT_NAME !== 'pull_request') throw new Error('Expected pull_request event');
   const repo = required('GITHUB_REPOSITORY');
@@ -126,7 +173,7 @@ export async function main() {
     const response = await fetch(url, { method, redirect: 'error', signal: AbortSignal.timeout(30_000),
       headers: { Authorization: `Bearer ${token}`, Accept: accept, 'Content-Type': 'application/json',
         'X-GitHub-Api-Version': '2022-11-28' }, body: body ? JSON.stringify(body) : undefined });
-    if (!response.ok) throw new Error(`GitHub HTTP ${response.status}`);
+    if (!response.ok) throw await httpError('GitHub', response);
     return accept.includes('diff') ? response.text() : response.json();
   }
   const pr = await github(base);
@@ -160,9 +207,8 @@ export async function main() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch(() => {
-    // Never log raw API responses, PR content, model output, or exception messages.
-    console.error('AI review failed safely; no approval was issued by this run. Check credentials, PR limits, and API availability.');
+  main().catch(error => {
+    console.error(`AI review failed safely: ${formatError(error)}`);
     process.exitCode = 1;
   });
 }

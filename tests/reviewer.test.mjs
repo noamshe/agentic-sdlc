@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { changedLines, validateFindings, buildReview, redact } from '../dist/index.js';
+import { changedLines, validateFindings, buildReview, redact, httpError, formatError } from '../dist/index.js';
 
 const lines = changedLines([{ filename: 'app.ts', patch: '@@ -10,2 +10,2 @@\n-old\n+new\n context', additions: 1, deletions: 1 }]);
 const finding = { severity: 'HIGH', title: 'Failure', body: 'Concrete consequence and fix.', path: 'app.ts', line: 10, side: 'RIGHT' };
@@ -37,4 +37,36 @@ test('credentials are redacted and comment text cannot mention users or inject H
   assert.ok(!review.body.includes('@admin'));
   assert.ok(!review.body.includes('<script>'));
   assert.ok(!review.body.includes('[click](https://example.org)'));
+});
+
+test('HTTP diagnostics retain status, provider code and message but exclude raw response data', async () => {
+  const error = await httpError('LLM', new Response(JSON.stringify({
+    error: { message: 'Model unavailable', code: 'model_not_found', type: 'invalid_request_error' },
+    request: 'private request content'
+  }), { status: 404, statusText: 'Not Found' }));
+  const diagnostic = formatError(error, []);
+  assert.match(diagnostic, /LLM HTTP 404 Not Found: Model unavailable/);
+  assert.match(diagnostic, /code: model_not_found/);
+  assert.match(diagnostic, /type: invalid_request_error/);
+  assert.ok(!diagnostic.includes('private request content'));
+  const github = await httpError('GitHub', new Response(JSON.stringify({ message: 'Resource not accessible by integration' }), { status: 403 }));
+  assert.match(formatError(github, []), /HTTP 403.*Resource not accessible/);
+  const nonJson = await httpError('GitHub', new Response('private proxy response', { status: 502 }));
+  assert.match(formatError(nonJson, []), /HTTP 502/);
+  assert.ok(!formatError(nonJson, []).includes('private proxy response'));
+});
+
+test('error messages, codes and causes are sanitized before logging', () => {
+  const secret = 'private/value"withquote';
+  const error = Object.assign(new Error(`failed ${secret}\n${encodeURIComponent(secret)}`), {
+    code: secret, cause: Object.assign(new Error(JSON.stringify(secret)), { code: 'ECONNRESET' }),
+    headers: { Authorization: 'never-print-headers' }
+  });
+  const diagnostic = formatError(error, [secret]);
+  for (const value of [secret, encodeURIComponent(secret), JSON.stringify(secret).slice(1, -1), 'never-print-headers'])
+    assert.ok(!diagnostic.includes(value));
+  assert.match(diagnostic, /ECONNRESET/);
+  assert.ok(!diagnostic.includes('\n'));
+  assert.ok(!formatError(new Error('Authorization: Bearer unexpectedcredential'), []).includes('unexpectedcredential'));
+  assert.match(formatError(new Error('Invalid review findings'), []), /Invalid review findings/);
 });
