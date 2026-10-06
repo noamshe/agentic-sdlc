@@ -1,0 +1,14 @@
+{
+  "name": "agentic-sdlc-lab",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "review": "node dist/index.js",
+    "test": "npm run build && node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "typescript": "5.7.2"
+  }
+}
