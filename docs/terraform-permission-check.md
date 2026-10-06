@@ -6,7 +6,7 @@ The workflow uses GitHub OIDC to assume `github-terraform-plan-checker` in accou
 
 ## How the check works
 
-`scripts/check-terraform-permissions.mjs` consumes `terraform show -json` and Terraform's initialized backend metadata. It does not read or print state contents, raw plans, policies, or credentials. It derives action/resource pairs for the lab's four general-purpose S3 resource types:
+`scripts/check-terraform-permissions.mjs` consumes `terraform show -json`, Terraform's initialized backend metadata, and root-module `.tf` files for the direct role references described below. It does not print state contents, raw plans, policies, or credentials. It derives action/resource pairs using the existing deterministic mapping:
 
 | Terraform resource | Mutation actions simulated (never executed) |
 | --- | --- |
@@ -14,6 +14,36 @@ The workflow uses GitHub OIDC to assume `github-terraform-plan-checker` in accou
 | `aws_s3_bucket_public_access_block` | `s3:PutBucketPublicAccessBlock` for writes and removal |
 | `aws_s3_bucket_ownership_controls` | `s3:PutBucketOwnershipControls`, `s3:DeleteBucketOwnershipControls` |
 | `aws_s3_bucket_server_side_encryption_configuration` | `s3:PutEncryptionConfiguration` for writes and removal |
+
+### Lambda and execution-role support
+
+These additions were checked against the AWS provider **v6.67.0** used by the failed Lambda run. The workflow's AWS 6.x constraint is unchanged. Every supported operation includes the refresh/waiter actions in the next table; create, update and delete actions are added only when planned. Replacements verify old and new identities separately.
+
+| Terraform type | Create | Update, only when the relevant field changes | Delete |
+| --- | --- | --- | --- |
+| `aws_cloudwatch_log_group` | `logs:CreateLogGroup`; `logs:PutRetentionPolicy` for positive retention | `logs:PutRetentionPolicy` for positive retention or `logs:DeleteRetentionPolicy` to remove it | `logs:DeleteLogGroup`, unless `skip_destroy` |
+| `aws_iam_role` | `iam:CreateRole` | `iam:UpdateAssumeRolePolicy`, `iam:UpdateRoleDescription`, `iam:UpdateRole` for trust, description, or session duration respectively | `iam:DeleteRole`; `iam:ListInstanceProfilesForRole`; `iam:DeleteRolePolicy` for existing inline policies; `iam:DetachRolePolicy` for known managed attachments |
+| `aws_iam_role_policy` | `iam:PutRolePolicy` | `iam:PutRolePolicy` | `iam:DeleteRolePolicy` |
+| `aws_lambda_function` | `lambda:CreateFunction`; `iam:PassRole` | `lambda:UpdateFunctionCode` for code/hash/architecture; `lambda:UpdateFunctionConfiguration` for role, runtime, handler, memory, timeout, description, or logging configuration; `iam:PassRole` only when the role changes | `lambda:DeleteFunction`, unless `skip_destroy` |
+| `data.archive_file` (`hashicorp/archive`) | Not applicable | Local ZIP packaging/read only; **no AWS IAM actions** | Not applicable |
+
+| Terraform type | Read/refresh and waiter permissions | Resource scope |
+| --- | --- | --- |
+| `aws_cloudwatch_log_group` | `logs:DescribeLogGroups`, `logs:ListTagsForResource` | Describe requires `*` according to AWS's authorization reference. Tag reads/writes use `arn:aws:logs:eu-west-1:240742387601:log-group:NAME`; create, retention and delete use that ARN with `:*`. |
+| `aws_iam_role` | `iam:GetRole`, `iam:ListRolePolicies`, `iam:GetRolePolicy`, `iam:ListAttachedRolePolicies` | Concrete role ARN including its known path. Policy reads cover the provider's inline-policy refresh loop. |
+| `aws_iam_role_policy` | `iam:GetRolePolicy` | The concrete parent role ARN, not an invented inline-policy ARN. |
+| `aws_lambda_function` | `lambda:GetFunction`, `lambda:ListTags`, `lambda:ListVersionsByFunction`, `lambda:GetFunctionCodeSigningConfig` | Unqualified `arn:aws:lambda:eu-west-1:240742387601:function:NAME` for the supported ZIP configuration. |
+| `data.archive_file` | None | Explicitly supported local `type`, `source_file`, `output_path` configuration, even when already resolved and absent from `resource_changes`. Shown separately in the summary; no IAM simulation for the archive. |
+
+Tag additions/changes require `iam:TagRole`, `logs:TagResource`, or `lambda:TagResource`; removals require the corresponding `UntagRole`/`UntagResource`. Unknown configured tags fail. Computed `tags_all` on an untagged create does not represent a tagging request when the provider has no default tags (provider settings beyond the region remain unsupported).
+
+`iam:PassRole` is simulated on the actual Lambda execution-role ARN with `iam:PassedToService=lambda.amazonaws.com`. Detaching known managed policies supplies `iam:PolicyARN` per attachment. Actions **inside** `aws_iam_role_policy.policy` are the function's runtime permissions, not deployment actions: granting log writes to the execution role requires `iam:PutRolePolicy`, not log writes by the deployer.
+
+The plan can leave a new execution-role ARN and inline-policy role name unknown. The checker accepts those only when root HCL has an exact direct assignment (`role = aws_iam_role.NAME.arn` for Lambda, `.id`/`.name` for an inline policy), the plan references agree, and that role's planned name/path establish its exact ARN. References alone, string transformations, conditionals, modules/indexed instances with unresolved roles, unknown/generated names, cross-account roles and ambiguous dependencies fail. Existing known role ARNs are accepted; a known role name requires a uniquely matching planned role with a known path.
+
+Support is intentionally restricted to the inspected local ZIP, unpublished, unqualified Lambda with basic logging/configuration, a basic execution role with a separately managed inline policy, and standard non-KMS log groups. Advanced Lambda configuration, role boundaries/policy attachments configured through `aws_iam_role`, forced detach, and other unmapped attributes fail. Before certifying a role deletion, the checker makes a read-only `ListInstanceProfilesForRole` call and fails if profiles exist or the response is incomplete; it never removes a role from a profile. Additional configurations need researched mappings and tests.
+
+Evidence: the failed run's human-readable plan showed four creates (Lambda, role, inline policy and log group), AWS provider 6.67.0 and archive provider 2.8.1. Its original JSON plan was deleted and no artifact remained. Tests reconstruct sanitized cases from that log and the actual repository configuration; they are not a copy of the original plan or evidence of live AWS authorization.
 
 The mapper also includes provider refresh/waiter reads for existing, unchanged, and newly created resources. Replacements check both the old and new bucket ARNs. Backend permissions include listing the state bucket, reading state, and the deployer's state writes; S3 lockfile actions are included if the existing backend enables them. These writes are only simulated, not granted or attempted.
 
@@ -28,6 +58,8 @@ The checker role must trust this repository's PR OIDC subject (`repo:noamshe/age
 The AWS role must already permit:
 
 - Read-only refresh operations for the planned S3 resources and read/list access to the existing state backend.
+- The read/refresh actions above for existing Lambda, IAM and log resources. `logs:DescribeLogGroups` needs `Resource: "*"`; other reads use the relevant concrete resource ARNs.
+- `iam:ListInstanceProfilesForRole` on execution roles when a role deletion is planned, for the read-only safety inspection.
 - `iam:SimulatePrincipalPolicy`, scoped to `arn:aws:iam::240742387601:role/github-terraform-deployer`.
 - `s3:GetBucketPolicy` on the relevant buckets and state bucket, to detect resource policies the role simulation cannot evaluate.
 - `s3:GetEncryptionConfiguration` on the state bucket, to reject backend encryption requiring unmapped KMS permissions.
@@ -45,3 +77,9 @@ npm test
 ```
 
 References: [Terraform JSON output](https://developer.hashicorp.com/terraform/internals/json-format), [AWS IAM simulation API](https://docs.aws.amazon.com/IAM/latest/APIReference/API_SimulatePrincipalPolicy.html), [AWS simulator limitations](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_testing-policies.html), [AWS provider S3 implementation](https://github.com/hashicorp/terraform-provider-aws/tree/main/internal/service/s3).
+
+New mapping research, in priority order:
+
+1. Official HashiCorp AWS provider documentation: [Lambda function](https://registry.terraform.io/providers/hashicorp/aws/6.67.0/docs/resources/lambda_function), [IAM role](https://registry.terraform.io/providers/hashicorp/aws/6.67.0/docs/resources/iam_role), [IAM role policy](https://registry.terraform.io/providers/hashicorp/aws/6.67.0/docs/resources/iam_role_policy), [CloudWatch log group](https://registry.terraform.io/providers/hashicorp/aws/6.67.0/docs/resources/cloudwatch_log_group); [archive_file](https://registry.terraform.io/providers/hashicorp/archive/2.8.1/docs/data-sources/file) documents local packaging.
+2. Official AWS Service Authorization References: [Lambda](https://docs.aws.amazon.com/service-authorization/latest/reference/list_lambda.html), [IAM](https://docs.aws.amazon.com/service-authorization/latest/reference/list_iam.html), [CloudWatch Logs](https://docs.aws.amazon.com/service-authorization/latest/reference/list_logs.html).
+3. Provider v6.67.0 implementations for actual refresh/waiter/update/delete branches: [Lambda](https://github.com/hashicorp/terraform-provider-aws/blob/v6.67.0/internal/service/lambda/function.go), [IAM role](https://github.com/hashicorp/terraform-provider-aws/blob/v6.67.0/internal/service/iam/role.go), [IAM inline policy](https://github.com/hashicorp/terraform-provider-aws/blob/v6.67.0/internal/service/iam/role_policy.go), [log group](https://github.com/hashicorp/terraform-provider-aws/blob/v6.67.0/internal/service/logs/group.go), and generated service tagging helpers in those directories.

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { requiredPermissions, simulate, report } from '../scripts/check-terraform-permissions.mjs';
+import { requiredPermissions, directRoleBindings, simulate, report, s3Buckets, verifyRoleProfiles } from '../scripts/check-terraform-permissions.mjs';
 
 const provider = 'registry.terraform.io/hashicorp/aws';
 const backend = { backend: { type: 's3', config: {
@@ -140,4 +140,198 @@ test('workflow contains no apply, no PR write permission, and uses a read-only p
   assert.match(workflow, /github-terraform-plan-checker/);
   assert.ok(!workflow.includes('needs:'));
   assert.ok(!workflow.includes('pull_request_target'));
+});
+
+const executionRole = 'arn:aws:iam::240742387601:role/lab-execution';
+const valuesByType = {
+  aws_iam_role: { name: 'lab-execution', path: '/', assume_role_policy: '{}', description: '', max_session_duration: 3600 },
+  aws_iam_role_policy: { name: 'logs', role: executionRole, policy: '{}' },
+  aws_cloudwatch_log_group: { name: '/aws/lambda/lab', retention_in_days: 1 },
+  aws_lambda_function: { function_name: 'lab', role: executionRole, filename: 'function.zip', source_code_hash: 'hash',
+    handler: 'index.handler', runtime: 'nodejs24.x', architectures: ['arm64'], memory_size: 128, timeout: 3,
+    reserved_concurrent_executions: -1, package_type: 'Zip', publish: false }
+};
+function extendedPlan(resources) {
+  const result = plan(resources);
+  result.configuration.root_module.resources.forEach(r => { r.expressions = {}; });
+  return result;
+}
+function mapped(type, actions, before, after) {
+  return requiredPermissions(extendedPlan([resource(type, actions, before, after)]), backend);
+}
+function mutations(result) {
+  return [...new Set(result.requirements.map(r => r.action).filter(a =>
+    /^(lambda|iam|logs):/.test(a) && !/:(Get|List|Describe)/.test(a)))].sort();
+}
+
+for (const [type, expected] of Object.entries({
+  aws_iam_role: { create: ['iam:CreateRole'], update: ['iam:UpdateRoleDescription'], delete: ['iam:DeleteRole'] },
+  aws_iam_role_policy: { create: ['iam:PutRolePolicy'], update: ['iam:PutRolePolicy'], delete: ['iam:DeleteRolePolicy'] },
+  aws_cloudwatch_log_group: { create: ['logs:CreateLogGroup', 'logs:PutRetentionPolicy'], update: ['logs:PutRetentionPolicy'], delete: ['logs:DeleteLogGroup'] },
+  aws_lambda_function: { create: ['iam:PassRole', 'lambda:CreateFunction'], update: ['lambda:UpdateFunctionCode'], delete: ['lambda:DeleteFunction'] }
+})) {
+  test(`${type}: separates create, update, delete and refresh`, () => {
+    const before = valuesByType[type];
+    const after = { ...before, ...({ aws_iam_role: { description: 'changed' }, aws_iam_role_policy: { policy: '{"Version":"2012-10-17"}' },
+      aws_cloudwatch_log_group: { retention_in_days: 7 }, aws_lambda_function: { source_code_hash: 'changed' } }[type]) };
+    for (const [operation, old, next] of [['create', null, before], ['update', before, after], ['delete', before, null], ['no-op', before, before]]) {
+      const result = mapped(type, [operation], old, next);
+      assert.deepEqual(result.issues, []);
+      assert.deepEqual(mutations(result), (expected[operation] ?? []).sort());
+      assert.ok(result.requirements.some(r => /^(iam|lambda|logs):(Get|List|Describe)/.test(r.action)));
+      assert.ok(result.requirements.filter(r => r.resource === '*').every(r => r.action === 'logs:DescribeLogGroups'));
+    }
+  });
+}
+
+test('Lambda configuration updates and role dependencies are conditional and concretely scoped', async () => {
+  const before = valuesByType.aws_lambda_function;
+  const timeout = mapped('aws_lambda_function', ['update'], before, { ...before, timeout: 5 });
+  assert.deepEqual(mutations(timeout), ['lambda:UpdateFunctionConfiguration']);
+  const result = mapped('aws_lambda_function', ['update'], before, { ...before, role: executionRole + '-new' });
+  assert.deepEqual(mutations(result), ['iam:PassRole', 'lambda:UpdateFunctionConfiguration']);
+  const pass = result.requirements.find(r => r.action === 'iam:PassRole');
+  assert.equal(pass.resource, executionRole + '-new');
+  await simulate([pass], async (_service, _operation, request) => {
+    assert.ok(request.ContextEntries.some(c => c.ContextKeyName === 'iam:PassedToService' && c.ContextKeyValues[0] === 'lambda.amazonaws.com'));
+    return { EvaluationResults: [{ EvalActionName: pass.action, EvalResourceName: pass.resource, EvalDecision: 'allowed' }] };
+  });
+});
+
+test('log retention removal, skip_destroy and tagging map only the requested operations', () => {
+  const log = valuesByType.aws_cloudwatch_log_group;
+  assert.deepEqual(mutations(mapped('aws_cloudwatch_log_group', ['update'], log, { ...log, retention_in_days: 0 })), ['logs:DeleteRetentionPolicy']);
+  assert.deepEqual(mutations(mapped('aws_cloudwatch_log_group', ['delete'], { ...log, skip_destroy: true }, null)), []);
+  assert.deepEqual(mutations(mapped('aws_lambda_function', ['delete'], { ...valuesByType.aws_lambda_function, skip_destroy: true }, null)), []);
+  for (const [type, prefix, suffix] of [['aws_iam_role', 'iam', 'Role'], ['aws_cloudwatch_log_group', 'logs', 'Resource'], ['aws_lambda_function', 'lambda', 'Resource']]) {
+    const before = { ...valuesByType[type], tags_all: { remove: 'old' } };
+    const result = mapped(type, ['update'], before, { ...before, tags_all: { add: 'new' } });
+    assert.deepEqual(mutations(result), [`${prefix}:Tag${suffix}`, `${prefix}:Untag${suffix}`]);
+  }
+});
+
+test('IAM trust and session updates, deletion cleanup and policy ARN conditions are mapped', () => {
+  const before = valuesByType.aws_iam_role;
+  assert.deepEqual(mutations(mapped('aws_iam_role', ['update'], before, { ...before, assume_role_policy: 'changed', max_session_duration: 7200 })),
+    ['iam:UpdateAssumeRolePolicy', 'iam:UpdateRole']);
+  const result = mapped('aws_iam_role', ['delete'], { ...before, inline_policy: [{ name: 'logs' }], managed_policy_arns: ['arn:aws:iam::aws:policy/ReadOnlyAccess'] }, null);
+  assert.deepEqual(mutations(result), ['iam:DeleteRole', 'iam:DeleteRolePolicy', 'iam:DetachRolePolicy']);
+  assert.ok(result.requirements.some(r => r.action === 'iam:ListInstanceProfilesForRole'));
+  assert.deepEqual(result.inspections, [{ roleName: 'lab-execution', address: 'aws_iam_role.example' }]);
+  assert.equal(result.requirements.find(r => r.action === 'iam:DetachRolePolicy').context[0].ContextKeyName, 'iam:PolicyARN');
+});
+
+test('replacements retain old deletion scopes and new creation scopes for every new managed type', () => {
+  for (const [type, field, oldValue, newValue, deleting, creating] of [
+    ['aws_iam_role', 'name', 'old-role', 'new-role', 'iam:DeleteRole', 'iam:CreateRole'],
+    ['aws_iam_role_policy', 'role', executionRole, executionRole + '-new', 'iam:DeleteRolePolicy', 'iam:PutRolePolicy'],
+    ['aws_cloudwatch_log_group', 'name', '/old', '/new', 'logs:DeleteLogGroup', 'logs:CreateLogGroup'],
+    ['aws_lambda_function', 'function_name', 'old-function', 'new-function', 'lambda:DeleteFunction', 'lambda:CreateFunction']
+  ]) {
+    const result = mapped(type, ['delete', 'create'], { ...valuesByType[type], [field]: oldValue }, { ...valuesByType[type], [field]: newValue });
+    assert.deepEqual(result.issues, []);
+    assert.ok(result.requirements.find(r => r.action === deleting).resource.includes(oldValue));
+    assert.ok(result.requirements.find(r => r.action === creating).resource.includes(newValue));
+  }
+});
+
+function lambdaCreationPlan() {
+  const role = resource('aws_iam_role', ['create'], null, { ...valuesByType.aws_iam_role, name: 'agentic-sdlc-lab-hello-execution' });
+  role.address = 'aws_iam_role.lab_lambda';
+  const policy = resource('aws_iam_role_policy', ['create'], null, { name: 'write-function-logs', role: null, policy: null });
+  policy.address = 'aws_iam_role_policy.lab_lambda_logs'; policy.change.after_unknown = { role: true, policy: true };
+  const lambda = resource('aws_lambda_function', ['create'], null, { ...valuesByType.aws_lambda_function, function_name: 'agentic-sdlc-lab-hello', role: null });
+  lambda.address = 'aws_lambda_function.lab'; lambda.change.after_unknown = { role: true, tags_all: true };
+  const logs = resource('aws_cloudwatch_log_group', ['create'], null, { ...valuesByType.aws_cloudwatch_log_group, name: '/aws/lambda/agentic-sdlc-lab-hello' });
+  logs.address = 'aws_cloudwatch_log_group.lab_lambda'; logs.change.after_unknown = { tags_all: true, log_group_class: true };
+  const result = extendedPlan([role, policy, lambda, logs]);
+  const configs = result.configuration.root_module.resources;
+  configs.find(r => r.type === 'aws_lambda_function').expressions.role = { references: ['aws_iam_role.lab_lambda.arn', 'aws_iam_role.lab_lambda'] };
+  configs.find(r => r.type === 'aws_iam_role_policy').expressions.role = { references: ['aws_iam_role.lab_lambda.id', 'aws_iam_role.lab_lambda'] };
+  result.configuration.provider_config.archive = { full_name: 'registry.terraform.io/hashicorp/archive', expressions: {} };
+  configs.push({ address: 'data.archive_file.lab_lambda', type: 'archive_file', mode: 'data', provider_config_key: 'archive',
+    expressions: { type: { constant_value: 'zip' }, source_file: {}, output_path: {} } });
+  return result;
+}
+
+test('inspected Lambda configuration resolves direct new-role references, supports archive, and reports denied Lambda actions', async () => {
+  const result = requiredPermissions(lambdaCreationPlan(), backend, { sources: [readFileSync('infra/lambda.tf', 'utf8')] });
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.noAwsPermissions, ['data.archive_file.lab_lambda']);
+  assert.equal(result.requirements.find(r => r.action === 'iam:PassRole').resource, 'arn:aws:iam::240742387601:role/agentic-sdlc-lab-hello-execution');
+  assert.ok(!result.requirements.some(r => r.action === 'logs:PutLogEvents' || r.action === 'logs:CreateLogStream'));
+  const results = await simulate(result.requirements, async (_s, _o, request) => ({ EvaluationResults: [{
+    EvalActionName: request.ActionNames[0], EvalResourceName: request.ResourceArns[0],
+    EvalDecision: request.ActionNames[0] === 'lambda:CreateFunction' ? 'implicitDeny' : 'allowed'
+  }] }));
+  const summary = report(results, result.issues, result.noAwsPermissions);
+  assert.match(summary, /FAIL/); assert.match(summary, /Missing or unverified actions: lambda:CreateFunction/);
+  assert.match(summary, /data.archive_file.lab_lambda.*no AWS IAM actions/);
+});
+
+test('archive read is explicitly local, generates no AWS actions, and rejects other providers', () => {
+  const archive = { address: 'data.archive_file.lab_lambda', type: 'archive_file', mode: 'data',
+    provider_name: 'registry.terraform.io/hashicorp/archive', change: { actions: ['read'], before: null, after: { type: 'zip' } } };
+  const input = lambdaCreationPlan(); input.resource_changes = [archive];
+  input.configuration.root_module.resources = input.configuration.root_module.resources.filter(r => r.type === 'archive_file');
+  const result = requiredPermissions(input, backend);
+  assert.deepEqual(result.issues, []);
+  assert.ok(result.requirements.every(r => r.reasons.every(reason => !reason.includes('archive_file'))));
+  archive.provider_name = provider;
+  assert.ok(requiredPermissions(input, backend).issues.length);
+});
+
+test('unknown role references are never inferred from non-direct HCL or references alone', () => {
+  const input = lambdaCreationPlan();
+  assert.ok(requiredPermissions(input, backend).issues.some(i => i.includes('Unknown Lambda execution-role')));
+  const sources = ['resource "aws_lambda_function" "lab" {\n role = format("%s", aws_iam_role.lab_lambda.arn)\n}'];
+  assert.equal(directRoleBindings(sources).size, 0);
+  for (const expression of ['aws_iam_role.lab_lambda.arn != "" ? aws_iam_role.lab_lambda.arn : "other"', 'aws_iam_role.lab_lambda.arn + "extra"'])
+    assert.equal(directRoleBindings([`resource "aws_lambda_function" "lab" {\n role = ${expression}\n}`]).size, 0);
+  const decoys = '# resource "aws_lambda_function" "lab" { role = aws_iam_role.lab_lambda.arn }\n' +
+    'locals { text = <<EOF\nresource "aws_lambda_function" "lab" { role = aws_iam_role.lab_lambda.arn }\nEOF\n}';
+  assert.equal(directRoleBindings([decoys]).size, 0);
+  const config = input.configuration.root_module.resources.find(r => r.type === 'aws_lambda_function');
+  config.expressions.role.references.push('var.other');
+  assert.ok(requiredPermissions(input, backend, { sources: [readFileSync('infra/lambda.tf', 'utf8')] }).issues.some(i => i.includes('Unknown Lambda execution-role')));
+  config.expressions.role.references.pop();
+  input.resource_changes.find(r => r.type === 'aws_lambda_function').change.after_unknown.role = false;
+  assert.ok(requiredPermissions(input, backend, { sources: [readFileSync('infra/lambda.tf', 'utf8')] }).issues.some(i => i.includes('Unknown Lambda execution-role')));
+});
+
+test('unsupported variants, unresolved scopes and configured unknown tags continue to fail closed', () => {
+  for (const [type, extra] of [['aws_lambda_function', { publish: true }], ['aws_lambda_function', { vpc_config: [{}] }],
+    ['aws_lambda_function', { role: 'arn:aws:iam::999999999999:role/other' }], ['aws_iam_role', { force_detach_policies: true }],
+    ['aws_iam_role', { path: null }], ['aws_cloudwatch_log_group', { kms_key_id: 'key' }],
+    ['aws_cloudwatch_log_group', { log_group_class: 'INFREQUENT_ACCESS' }]])
+    assert.ok(mapped(type, ['create'], null, { ...valuesByType[type], ...extra }).issues.length, `${type} ${JSON.stringify(extra)}`);
+  const input = extendedPlan([resource('aws_lambda_function', ['create'], null, valuesByType.aws_lambda_function)]);
+  input.resource_changes[0].change.after_unknown.tags_all = true;
+  input.configuration.root_module.resources[0].expressions.tags = { references: ['var.tags'] };
+  assert.ok(requiredPermissions(input, backend).issues.some(i => i.includes('Unknown tags')));
+});
+
+test('mixed resource permissions preserve S3 policy checks without treating IAM/Lambda/log ARNs as buckets', () => {
+  const result = requiredPermissions(lambdaCreationPlan(), backend, { sources: [readFileSync('infra/lambda.tf', 'utf8')] });
+  assert.deepEqual(s3Buckets(result.requirements), ['lab-state']);
+});
+
+test('IAM role deletion inspection is read-only and fails closed on instance profiles or incomplete responses', async () => {
+  const inspections = [{ roleName: 'lab-execution', address: 'aws_iam_role.example' }];
+  for (const response of [{ InstanceProfiles: [] }, { InstanceProfiles: [{}] }, { InstanceProfiles: [], IsTruncated: true }, {}]) {
+    const issues = await verifyRoleProfiles(inspections, async (service, operation, request) => {
+      assert.equal(service, 'iam'); assert.equal(operation, 'list-instance-profiles-for-role');
+      assert.deepEqual(request, { RoleName: 'lab-execution' });
+      return response;
+    });
+    assert.equal(issues.length, Array.isArray(response.InstanceProfiles) && !response.InstanceProfiles.length && !response.IsTruncated ? 0 : 1);
+  }
+  await assert.rejects(verifyRoleProfiles(inspections, async () => { throw new Error('AccessDenied'); }), /AccessDenied/);
+});
+
+test('unknown retention and unmapped role creation dependencies cannot be certified', () => {
+  const input = extendedPlan([resource('aws_cloudwatch_log_group', ['create'], null, { name: '/lab', retention_in_days: null })]);
+  input.resource_changes[0].change.after_unknown.retention_in_days = true;
+  assert.ok(requiredPermissions(input, backend).issues.some(i => i.includes('Unknown retention')));
+  assert.ok(mapped('aws_iam_role', ['create'], null, { ...valuesByType.aws_iam_role, permissions_boundary: 'policy' }).issues.length);
 });
