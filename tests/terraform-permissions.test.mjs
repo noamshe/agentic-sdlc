@@ -440,6 +440,66 @@ const apiValues = {
 const apiPaths = { aws_apigatewayv2_api: '/api123', aws_apigatewayv2_integration: '/api123/integrations/int123',
   aws_apigatewayv2_route: '/api123/routes/route123', aws_apigatewayv2_stage: '/api123/stages/$default' };
 
+const refreshedStage = { ...apiValues.aws_apigatewayv2_stage, default_route_settings: [{
+  data_trace_enabled: false, detailed_metrics_enabled: false, logging_level: '',
+  throttling_burst_limit: 0, throttling_rate_limit: 0
+}] };
+
+test('stage accepts provider-populated defaults without adding unrelated mutation permissions', () => {
+  for (const [operation, before, after, verb] of [
+    ['create', null, refreshedStage, 'POST'], ['no-op', refreshedStage, refreshedStage, null],
+    ['update', refreshedStage, { ...refreshedStage, description: 'changed' }, 'PATCH'],
+    ['delete', refreshedStage, null, 'DELETE']
+  ]) {
+    const mapping = mapped('aws_apigatewayv2_stage', [operation], before, after);
+    assert.deepEqual(mapping.issues, []);
+    assert.deepEqual(mapping.requirements.filter(item => item.action.startsWith('apigateway:')).map(item =>
+      [item.action, item.resource]).sort(), [
+      ['apigateway:GET', gatewayBase + '/api123'],
+      ['apigateway:GET', gatewayBase + '/api123/stages/$default'],
+      ...(verb ? [[`apigateway:${verb}`, gatewayBase + (verb === 'POST' ? '/api123/stages' : '/api123/stages/$default')]] : [])
+    ].sort());
+  }
+  const next = { ...refreshedStage, default_route_settings: [{ ...refreshedStage.default_route_settings[0], throttling_rate_limit: 100 }] };
+  const update = mapped('aws_apigatewayv2_stage', ['update'], refreshedStage, next);
+  assert.deepEqual(update.issues, []);
+  assert.ok(update.requirements.some(item => item.action === 'apigateway:PATCH' && item.resource.endsWith('/stages/$default')));
+});
+
+test('provider defaults coexist with same-plan generated API IDs and denied permissions still fail', async () => {
+  const { input, sources } = generatedApiPlan();
+  input.resource_changes.find(item => item.type === 'aws_apigatewayv2_stage').change.after.default_route_settings = refreshedStage.default_route_settings;
+  const mapping = requiredPermissions(input, backend, { sources });
+  assert.deepEqual(mapping.issues, []);
+  for (const decision of ['allowed', 'implicitDeny']) {
+    const results = await simulate(mapping.requirements, async (_s, _o, request) => ({ EvaluationResults: [{
+      EvalActionName: request.ActionNames[0], EvalResourceName: request.ResourceArns[0], EvalDecision: decision
+    }] }));
+    assert.match(report(results, []), decision === 'allowed' ? /PASS/ : /FAIL/);
+  }
+});
+
+test('explicit stage defaults, enabled advanced features, malformed and unknown defaults remain unsupported', () => {
+  for (const extra of [{ detailed_metrics_enabled: true }, { data_trace_enabled: true }, { logging_level: 'INFO' },
+    { future_setting: false }, { throttling_rate_limit: 'unknown' }, { throttling_burst_limit: -1 }]) {
+    const values = { ...refreshedStage, default_route_settings: [{ ...refreshedStage.default_route_settings[0], ...extra }] };
+    assert.ok(mapped('aws_apigatewayv2_stage', ['no-op'], values, values).issues.length);
+  }
+  for (const settings of [[null], [[], {}], [{}, {}]]) {
+    const values = { ...refreshedStage, default_route_settings: settings };
+    assert.ok(mapped('aws_apigatewayv2_stage', ['create'], null, values).issues.length);
+  }
+  const explicit = extendedPlan([resource('aws_apigatewayv2_stage', ['create'], null, refreshedStage)]);
+  explicit.configuration.root_module.resources[0].expressions.default_route_settings = {};
+  assert.ok(requiredPermissions(explicit, backend).issues.some(issue => issue.includes('Unmapped configuration')));
+  delete explicit.configuration.root_module.resources[0].expressions.default_route_settings;
+  explicit.resource_changes[0].change.after_unknown = { default_route_settings: [{ detailed_metrics_enabled: true }] };
+  assert.ok(requiredPermissions(explicit, backend).issues.some(issue => issue.includes('Unknown API Gateway stage default')));
+  for (const extra of [{ access_log_settings: [{}] }, { route_settings: [{}] }, { tags_all: { lab: 'test' } },
+    { stage_variables: { example: 'value' } }, { client_certificate_id: 'cert' }])
+    assert.ok(mapped('aws_apigatewayv2_stage', ['create'], null, { ...refreshedStage, ...extra }).issues.length);
+});
+
 for (const type of Object.keys(apiPaths)) {
   test(`${type}: maps exact management verbs and paths for create/update/delete/refresh`, () => {
     const before = apiValues[type];
