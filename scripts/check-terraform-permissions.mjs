@@ -52,6 +52,22 @@ const specs = {
       'architectures', 'memory_size', 'timeout', 'description', 'logging_config', 'tags',
       'publish', 'skip_destroy', 'region'], extended: true
   },
+  aws_apigatewayv2_api: {
+    attributes: ['name', 'protocol_type', 'description', 'disable_execute_api_endpoint', 'region'], extended: true
+  },
+  aws_apigatewayv2_integration: {
+    attributes: ['api_id', 'integration_type', 'integration_uri', 'integration_method', 'payload_format_version',
+      'description', 'timeout_milliseconds', 'region'], extended: true
+  },
+  aws_apigatewayv2_route: {
+    attributes: ['api_id', 'route_key', 'authorization_type', 'target', 'region'], extended: true
+  },
+  aws_apigatewayv2_stage: {
+    attributes: ['api_id', 'name', 'auto_deploy', 'description', 'region'], extended: true
+  },
+  aws_lambda_permission: {
+    attributes: ['statement_id', 'statement_id_prefix', 'action', 'function_name', 'principal', 'source_arn', 'region'], extended: true
+  },
   archive_file: {
     attributes: ['type', 'source_file', 'output_path'], mode: 'data', provider: ARCHIVE, local: true
   }
@@ -82,6 +98,14 @@ const changed = (change, key) => unknown(change.after_unknown?.[key]) ||
 // also have references). Accept unknown role identities only for an exact, direct
 // root-module HCL binding, checked against the plan's references as well.
 export function directRoleBindings(sources) {
+  return directBindings(sources, /^"aws_(lambda_function|iam_role_policy)"$/, 'role', /^aws_iam_role\.[\w-]+\.(arn|id|name)$/);
+}
+
+function directApiBindings(sources) {
+  return directBindings(sources, /^"aws_apigatewayv2_(integration|route|stage)"$/, 'api_id', /^aws_apigatewayv2_api\.[\w-]+\.id$/);
+}
+
+function directBindings(sources, types, field, target) {
   const bindings = new Map();
   const lexer = /\/\*[\s\S]*?\*\/|\/\/[^\n]*|#[^\n]*|<<-?(\w+)[^\n]*\n[\s\S]*?\n[ \t]*\1(?:\r?\n|$)|"(?:\\.|[^"\\])*"|[A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*)*|[{}=]|\n|[^\s]/g;
   for (const source of sources) {
@@ -89,15 +113,15 @@ export function directRoleBindings(sources) {
       .filter(token => !/^(\/\*|\/\/|#)/.test(token));
     let depth = 0, address = null;
     for (let i = 0; i < tokens.length; i++) {
-      if (depth === 0 && tokens[i] === 'resource' && /^"aws_(lambda_function|iam_role_policy)"$/.test(tokens[i + 1] ?? '') &&
+      if (depth === 0 && tokens[i] === 'resource' && types.test(tokens[i + 1] ?? '') &&
           /^"[\w-]+"$/.test(tokens[i + 2] ?? '') && tokens[i + 3] === '{') {
         address = `${JSON.parse(tokens[i + 1])}.${JSON.parse(tokens[i + 2])}`;
         i += 3; depth = 1; continue;
       }
       if (tokens[i] === '{') depth++;
       else if (tokens[i] === '}') { depth--; if (depth === 0) address = null; }
-      else if (address && depth === 1 && tokens[i] === 'role' && tokens[i + 1] === '=' &&
-          /^aws_iam_role\.[\w-]+\.(arn|id|name)$/.test(tokens[i + 2] ?? '') &&
+      else if (address && depth === 1 && tokens[i] === field && tokens[i + 1] === '=' &&
+          target.test(tokens[i + 2] ?? '') &&
           ['\n', '}'].includes(tokens[i + 3])) bindings.set(address, tokens[i + 2]);
     }
   }
@@ -129,6 +153,20 @@ function resolveRole(resource, phase, planResources, configuration, bindings) {
   return matches.length === 1 ? roleArn(matches[0].change?.after) : null;
 }
 
+function generatedApi(resource, configuration, resources, bindings) {
+  const creatingAPI = item => item.type === 'aws_apigatewayv2_api' && item.mode === 'managed' &&
+    item.provider_name === PROVIDER && item.change?.actions?.includes('create') &&
+    item.change.after?.protocol_type === 'HTTP' && item.change.after?.id == null && item.change.after_unknown?.id === true;
+  if (resource.type === 'aws_apigatewayv2_api') return creatingAPI(resource);
+  const binding = bindings.get(resource.address);
+  if (!binding || !/^aws_apigatewayv2_api\.[\w-]+\.id$/.test(binding)) return false;
+  const address = binding.slice(0, -3);
+  const refs = configuration.get(resource.address)?.expressions?.api_id?.references ?? [];
+  const matches = resources.filter(item => item.address === address);
+  return refs.includes(binding) && refs.every(ref => ref === binding || ref === address) &&
+    matches.length === 1 && creatingAPI(matches[0]);
+}
+
 function mapExtended(resource, configuration, resources, bindings, add, issues, inspections) {
   const change = resource.change;
   const creating = change.actions.includes('create'), updating = change.actions.includes('update');
@@ -152,7 +190,73 @@ function mapExtended(resource, configuration, resources, bindings, add, issues, 
       if (Object.entries(newTags).some(([key, value]) => oldTags[key] !== value)) action(`${prefix}:Tag${prefix === 'iam' ? 'Role' : 'Resource'}`, arn);
       if (!create && Object.keys(oldTags).some(key => !Object.hasOwn(newTags, key))) action(`${prefix}:Untag${prefix === 'iam' ? 'Role' : 'Resource'}`, arn);
     };
-    if (resource.type === 'aws_cloudwatch_log_group') {
+    if (resource.type.startsWith('aws_apigatewayv2_')) {
+      // Official provider v6.67.0: internal/service/apigatewayv2/{api,integration,route,stage}.go
+      // IAM verbs and ARN paths: https://docs.aws.amazon.com/service-authorization/latest/reference/list_apigatewayv2.html
+      // Support the untagged HTTP API/Lambda proxy subset in infra/api.tf.
+      if (Object.keys(values.tags_all ?? values.tags ?? {}).length || values.credentials_arn || values.body ||
+          values.target && resource.type === 'aws_apigatewayv2_api' || values.cors_configuration?.length ||
+          values.access_log_settings?.length || values.route_settings?.length || values.default_route_settings?.length ||
+          values.client_certificate_id || values.stage_variables && Object.keys(values.stage_variables).length)
+        issue('Advanced API Gateway configuration or tagging is not mapped');
+      if (resource.type === 'aws_apigatewayv2_api' && values.protocol_type !== 'HTTP') issue('Only HTTP APIs are mapped');
+      if (resource.type === 'aws_apigatewayv2_integration' && (values.integration_type !== 'AWS_PROXY' ||
+          values.connection_type && values.connection_type !== 'INTERNET' || values.integration_subtype || values.connection_id ||
+          values.integration_method !== 'POST' || values.payload_format_version !== '2.0'))
+        issue('Only HTTP Lambda proxy integrations without a credentials role are mapped');
+      if (resource.type === 'aws_apigatewayv2_route' && (values.authorization_type ?? 'NONE') !== 'NONE')
+        issue('Route authorizers are not mapped');
+
+      const base = `arn:aws:apigateway:${REGION}::/apis`;
+      const isAPI = resource.type === 'aws_apigatewayv2_api';
+      // AWS-generated IDs are normal on create. Use explicit ARN patterns only
+      // for a proven same-plan creation; never reuse replacement IDs or guess IDs.
+      let apiID = isAPI ? values.id : values.api_id;
+      const validID = id => typeof id === 'string' && /^[a-z0-9]+$/.test(id);
+      if (isAPI && create) action('apigateway:POST', base);
+      const generated = create && apiID == null && change.after_unknown?.[isAPI ? 'id' : 'api_id'] === true &&
+        generatedApi(resource, configuration, resources, bindings);
+      if (!validID(apiID) && !generated) { issue(`Unverified API Gateway ID (${phase}); required GET${create ? '/POST' : update ? '/PATCH' : remove ? '/DELETE' : ''} cannot be scoped`); continue; }
+      if (generated) apiID = '*';
+      const apiArn = `${base}/${apiID}`;
+      const collection = ({ aws_apigatewayv2_integration: 'integrations', aws_apigatewayv2_route: 'routes',
+        aws_apigatewayv2_stage: 'stages' })[resource.type];
+      if (!isAPI && create) action('apigateway:POST', `${apiArn}/${collection}`);
+      if (resource.type === 'aws_apigatewayv2_stage') action('apigateway:GET', apiArn); // Stage refresh also calls GetApi.
+      let id = resource.type === 'aws_apigatewayv2_stage' ? values.name : values.id;
+      const generatedChild = !isAPI && resource.type !== 'aws_apigatewayv2_stage' && create &&
+        id == null && change.after_unknown?.id === true;
+      if (!isAPI && !(resource.type === 'aws_apigatewayv2_stage'
+        ? typeof id === 'string' && /^(?:\$default|[\w-]{1,128})$/.test(id) : validID(id) || generatedChild)) {
+        issue(`Unverified API Gateway child ID (${phase}); required GET/PATCH/DELETE cannot be scoped`); continue;
+      }
+      if (generatedChild) id = '*';
+      const arn = isAPI ? apiArn : `${apiArn}/${collection}/${id}`;
+      action('apigateway:GET', arn);
+      const updateFields = isAPI ? ['name', 'description', 'disable_execute_api_endpoint']
+        : resource.type === 'aws_apigatewayv2_integration'
+          ? ['integration_uri', 'integration_method', 'payload_format_version', 'description', 'timeout_milliseconds']
+          : resource.type === 'aws_apigatewayv2_route' ? ['route_key', 'authorization_type', 'target']
+          : ['auto_deploy', 'description'];
+      if (update && updateFields.some(field => changed(change, field))) action('apigateway:PATCH', arn);
+      if (remove) action('apigateway:DELETE', arn);
+    } else if (resource.type === 'aws_lambda_permission') {
+      // Official provider v6.67.0: internal/service/lambda/permission.go (all input changes are ForceNew).
+      // Exact actions/conditions: https://docs.aws.amazon.com/service-authorization/latest/reference/list_lambda.html
+      const name = values.function_name;
+      const arn = typeof name === 'string' && /^[\w-]{1,64}$/.test(name)
+        ? `arn:aws:lambda:${REGION}:${ACCOUNT}:function:${name}`
+        : typeof name === 'string' && new RegExp(`^arn:aws:lambda:${REGION}:${ACCOUNT}:function:[\\w-]{1,64}$`).test(name) ? name : null;
+      if (!arn) { issue(`Unknown/unsupported permission function (${phase})`); continue; }
+      action('lambda:GetPolicy', arn);
+      if (values.qualifier || values.function_url_auth_type || values.invoked_via_function_url || values.event_source_token ||
+          values.principal_org_id || values.source_account || values.action !== 'lambda:InvokeFunction' ||
+          values.principal !== 'apigateway.amazonaws.com') { issue('Only unqualified API Gateway invocation permissions are mapped'); continue; }
+      if (update) issue('Lambda permission updates require replacement');
+      const context = [{ ContextKeyName: 'lambda:Principal', ContextKeyValues: ['apigateway.amazonaws.com'], ContextKeyType: 'string' }];
+      if (create) action('lambda:AddPermission', arn, context);
+      if (remove) action('lambda:RemovePermission', arn, context);
+    } else if (resource.type === 'aws_cloudwatch_log_group') {
       if (typeof values.name !== 'string' || !/^[\w./#-]{1,512}$/.test(values.name)) { issue('Unknown/unsupported log-group name'); continue; }
       const arn = `arn:aws:logs:${REGION}:${ACCOUNT}:log-group:${values.name}`;
       // DescribeLogGroups does not support resource-level authorization (AWS SAR).
@@ -231,7 +335,7 @@ export function requiredPermissions(plan, backendState, { sources = [] } = {}) {
   const issues = [], requirements = new Map(), noAwsPermissions = [], inspections = [];
   const configured = configuredResources(plan.configuration?.root_module);
   const configuration = new Map(configured.map(resource => [resource.address, resource]));
-  const bindings = directRoleBindings(sources);
+  const bindings = new Map([...directRoleBindings(sources), ...directApiBindings(sources)]);
   if (plan.errored || plan.complete === false || plan.deferred_changes?.length)
     issues.push('Plan is incomplete, errored, or contains deferred changes');
   const add = (action, resource, reason, context = []) => {

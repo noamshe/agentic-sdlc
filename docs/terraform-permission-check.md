@@ -51,6 +51,41 @@ For each concrete action/resource pair, the helper calls `iam:SimulatePrincipalP
 
 This is a conservative, explicit mapping, not a general Terraform-to-IAM inference engine. Unsupported types, data sources, provider settings, inline bucket configuration, forced object deletion, KMS encryption, non-default workspaces, imports/moves, unknown tags, and unresolved bucket names fail verification. Existing `bucket_prefix` names are known from state; creating/replacing such a bucket will fail until its eventual ARN can be determined. No generated name or wildcard ARN is fabricated to obtain a pass. No infrastructure configuration is changed to work around this.
 
+## API Gateway generated IDs
+
+The checker supports the untagged API Gateway v2 HTTP API, Lambda proxy integration,
+public route, stage, and unqualified `aws_lambda_permission` subset. Management
+actions are `apigateway:POST` for creates, `apigateway:GET` for refreshes,
+`apigateway:PATCH` for mapped updates, and `apigateway:DELETE` for deletes.
+Lambda permissions use `lambda:GetPolicy`, `lambda:AddPermission`, and
+`lambda:RemovePermission`, scoped to the function; mutations retain the
+`lambda:Principal=apigateway.amazonaws.com` simulation context.
+
+AWS-generated IDs marked unknown in a create plan are normal. API creation checks
+`POST` on `arn:aws:apigateway:eu-west-1::/apis` and post-create `GET` on `/apis/*`.
+For an integration, route, or stage with an unknown API ID, the checker requires
+an exact root-module HCL assignment `api_id = aws_apigatewayv2_api.NAME.id`, matching
+plan references, and that API's same-plan HTTP create/replacement with a computed
+unknown ID. Child creates then check `POST` on `/apis/*/integrations`, `/routes`,
+or `/stages`, and `GET` on the respective child paths. Integration/route IDs marked
+unknown on create use `*` in their ID segment; a stage still needs its known name.
+New children under an existing API retain that API's concrete ID.
+
+These ARN patterns are explicit simulation scopes for generated identifiers, not
+invented IDs or skipped permissions. All mapped action/scope pairs must be allowed
+by `iam:SimulatePrincipalPolicy`; API collection creation alone is insufficient.
+Missing context, missing results, denied actions, unsupported configuration,
+unproven/transformed dependencies, and unknown existing/update/delete identities
+still fail. Replacements use the old concrete scopes for deletes and generated
+scopes only for new creates; no PATCH/DELETE is added solely for a create.
+
+Pattern simulation is a preflight check, not universal proof for every eventual
+ID: identifier-specific policies/denies or resource conditions can produce a
+different authorization result during apply. No live AWS deployment was used to
+validate this mapping. Sources: [AWS API Gateway v2 authorization reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_apigatewayv2.html),
+[IAM simulation API](https://docs.aws.amazon.com/IAM/latest/APIReference/API_SimulatePrincipalPolicy.html),
+and [AWS provider v6.67.0 API implementation](https://github.com/hashicorp/terraform-provider-aws/blob/v6.67.0/internal/service/apigatewayv2/api.go).
+
 ## External prerequisites (not configured by this change)
 
 The checker role must trust this repository's PR OIDC subject (`repo:noamshe/agentic-sdlc:pull_request`) with audience `sts.amazonaws.com`. Restrict access to trusted contributors; Terraform/provider code from the PR runs with this identity and can read sensitive state. GitHub permissions are only `id-token: write` and `contents: read`.
