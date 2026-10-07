@@ -3,11 +3,18 @@
 `GET /hello` invokes `agentic-sdlc-lab-hello`. It logs
 `Hello from the Agentic SDLC lab.` and synchronously invokes
 `new-inner-lambda-test`, which logs `hello from new lambda`.
-Each greeting appears in its function's own CloudWatch log group. The HTTP
-response remains `{ "message": "Hello from the Agentic SDLC lab." }`.
+Each greeting appears in its function's own CloudWatch log group. The outer
+function decodes the inner response and returns HTTP 200 with
+`Content-Type: text/plain; charset=utf-8` and these two lines:
+
+```text
+Hello from the Agentic SDLC lab.
+hello from new lambda
+```
 
 The outer function fails if invocation is denied, times out, or the inner function
-reports an error, rather than returning a successful greeting for a failed chain.
+reports an error or returns an invalid/missing greeting, rather than returning
+a successful greeting for a failed chain.
 It uses the AWS SDK v3 included in the Node.js Lambda runtime and execution-role
 credentials. This minimal lab package does not pin/bundle the SDK version.
 
