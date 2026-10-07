@@ -1,7 +1,10 @@
 import { handler as login } from './handlers/login.mjs';
 
+import { handler as backOffice } from './handlers/back-office.mjs';
+
 const routes = {
-  'GET /login': login
+  'GET /login': login,
+  'GET /back-office': backOffice
 };
 
 export const handler = async (event, context) => {

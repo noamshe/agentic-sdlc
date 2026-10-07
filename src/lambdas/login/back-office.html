@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Back office · Agentic SDLC Lab</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #17213b; background: #f5f7fc; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header { background: #202442; color: #fff; }
+    .bar { max-width: 1160px; margin: auto; padding: 22px 28px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+    .brand { font-weight: 650; font-size: 15px; }
+    .brand span { color: #b9b5ef; margin-right: 10px; font-family: monospace; }
+    a { color: inherit; }
+    .logout { text-decoration: none; padding: 10px 18px; border: 1px solid #ffffff40; border-radius: 10px; font-size: 14px; white-space: nowrap; }
+    .logout:hover { background: #ffffff15; }
+    a:focus-visible { outline: 3px solid #a99df5; outline-offset: 4px; }
+    main { max-width: 1160px; margin: auto; padding: 44px 28px 56px; }
+    .eyebrow { color: #6554cf; text-transform: uppercase; font-size: 11px; font-weight: 700; letter-spacing: .15em; }
+    h1 { margin: 12px 0; font-size: clamp(30px, 5vw, 42px); letter-spacing: -.04em; }
+    .subtitle { color: #727a8e; line-height: 1.6; margin: 0; }
+    .notice { margin: 24px 0; padding: 14px 18px; background: #eeebff; border: 1px solid #ded8fb; border-radius: 12px; color: #554991; font-size: 14px; line-height: 1.6; }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin: 28px 0 36px; }
+    .stat { background: #fff; padding: 24px; border: 1px solid #e5e8f0; border-radius: 16px; }
+    .stat dt { color: #727a8e; font-size: 13px; }
+    .stat dd { margin: 12px 0 0; font-size: 30px; font-weight: 650; }
+    .section-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 18px; }
+    h2 { margin: 0; font-size: 22px; letter-spacing: -.03em; }
+    .badge { font-size: 12px; color: #6554cf; background: #eeebff; padding: 6px 10px; border-radius: 20px; }
+    .gallery { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+    figure { margin: 0; overflow: hidden; background: #fff; border: 1px solid #e5e8f0; border-radius: 18px; }
+    svg { width: 100%; height: auto; display: block; }
+    figcaption { padding: 20px; }
+    h3 { margin: 0 0 8px; font-size: 16px; }
+    figcaption p { margin: 0; color: #727a8e; font-size: 13px; line-height: 1.6; }
+    footer { margin-top: 32px; font-size: 12px; color: #727a8e; }
+    @media (max-width: 700px) { .gallery { grid-template-columns: 1fr; } .stats { gap: 10px; } .stat { padding: 16px 12px; } main { padding: 30px 20px; } .bar { padding: 18px 20px; } }
+    @media (max-width: 380px) { .stats { grid-template-columns: 1fr; } .section-heading { align-items: flex-start; flex-direction: column; } }
+  </style>
+</head>
+<body>
+  <header><div class="bar"><div class="brand"><span aria-hidden="true">&gt;_</span>Agentic SDLC Lab</div><nav aria-label="Account"><a class="logout" href="/login">Log out</a></nav></div></header>
+  <main>
+    <span class="eyebrow">Demo workspace</span>
+    <h1>Welcome to your back office</h1>
+    <p class="subtitle">A little inspiration for your next project. Explore the sample collection below.</p>
+    <p class="notice">You're exploring a demo. All content and numbers are examples, and no account is needed.</p>
+    <dl class="stats" aria-label="Sample workspace overview">
+      <div class="stat"><dt>Sample images</dt><dd>3</dd></div>
+      <div class="stat"><dt>Collections</dt><dd>1</dd></div>
+      <div class="stat"><dt>Workspace</dt><dd>Demo</dd></div>
+    </dl>
+    <section aria-labelledby="gallery-title">
+      <div class="section-heading"><h2 id="gallery-title">Image collection</h2><span class="badge">Sample illustrations</span></div>
+      <div class="gallery">
+        <figure>
+          <svg viewBox="0 0 480 320" role="img" aria-labelledby="mountain-title"><title id="mountain-title">Layered purple mountains beneath a warm sunrise</title><rect width="480" height="320" fill="#eae3fa"/><circle cx="345" cy="90" r="44" fill="#ffca9b"/><path d="M0 255 150 70 310 255 410 140 480 210V320H0Z" fill="#a494ce"/><path d="m105 126 45-56 49 57-46-19Z" fill="#fff7ff"/><path d="M0 280 105 210 245 310 365 220 480 285V320H0Z" fill="#6a5a98"/><path d="M0 307 180 270 310 320H0Z" fill="#45385f"/></svg>
+          <figcaption><h3>Mountain mornings</h3><p>Soft colors and open horizons for a fresh start.</p></figcaption>
+        </figure>
+        <figure>
+          <svg viewBox="0 0 480 320" role="img" aria-labelledby="coast-title"><title id="coast-title">Turquoise ocean waves rolling onto a sandy beach</title><rect width="480" height="320" fill="#cfeef0"/><circle cx="360" cy="65" r="32" fill="#fff4cf"/><path d="M0 145Q120 125 240 150T480 145V320H0Z" fill="#62b7bf"/><path d="M0 205Q120 165 240 205T480 195V320H0Z" fill="#368d9e"/><path d="M0 255Q110 210 230 245T480 240V320H0Z" fill="#f1d8b5"/><path d="M0 250Q110 205 230 240T480 235" fill="none" stroke="#f7fbff" stroke-width="8"/><path d="m335 280 20-9m-175 21 26-6" stroke="#d1b18d" stroke-width="5" stroke-linecap="round"/></svg>
+          <figcaption><h3>Coastal calm</h3><p>A quiet shoreline with room to breathe and imagine.</p></figcaption>
+        </figure>
+        <figure>
+          <svg viewBox="0 0 480 320" role="img" aria-labelledby="garden-title"><title id="garden-title">Green botanical leaves arranged in a terracotta pot</title><rect width="480" height="320" fill="#e8eee4"/><circle cx="240" cy="155" r="118" fill="#d5dfcf"/><path d="M240 250V90m0 110-65-55m65 28 65-65" stroke="#47694d" stroke-width="8" fill="none"/><ellipse cx="182" cy="143" rx="28" ry="57" transform="rotate(-48 182 143)" fill="#6e9270"/><ellipse cx="298" cy="110" rx="28" ry="58" transform="rotate(45 298 110)" fill="#47694d"/><ellipse cx="238" cy="95" rx="25" ry="55" fill="#88a880"/><path d="M183 222H297L279 292H201Z" fill="#bd7b5e"/><rect x="175" y="215" width="130" height="18" rx="6" fill="#d49372"/></svg>
+          <figcaption><h3>Everyday growth</h3><p>A simple botanical study inspired by small beginnings.</p></figcaption>
+        </figure>
+      </div>
+    </section>
+    <footer>Finished exploring? Use Log out to return to the login page.</footer>
+  </main>
+</body>
+</html>

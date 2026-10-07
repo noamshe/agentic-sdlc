@@ -25,13 +25,13 @@
     input::placeholder { color: #9298a7; }
     input:focus-visible { outline: none; border-color: #7568df; box-shadow: 0 0 0 3px #7568df20; }
     .field { margin-bottom: 20px; }
-    button { width: 100%; min-height: 48px; margin-top: 8px; border: 0; border-radius: 10px; background: #6554cf; color: #fff; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; box-shadow: 0 6px 16px #6554cf25; transition: background .15s, transform .15s; }
-    button:hover { background: #5442bd; }
-    button:active { transform: translateY(1px); }
-    button:focus-visible { outline: 3px solid #b9b0f0; outline-offset: 3px; }
+    .sign-in { display: grid; place-items: center; text-decoration: none; width: 100%; min-height: 48px; margin-top: 8px; border: 0; border-radius: 10px; background: #6554cf; color: #fff; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; box-shadow: 0 6px 16px #6554cf25; transition: background .15s, transform .15s; }
+    .sign-in:hover { background: #5442bd; }
+    .sign-in:active { transform: translateY(1px); }
+    .sign-in:focus-visible { outline: 3px solid #b9b0f0; outline-offset: 3px; }
     .notice { margin: 22px 0 0; padding: 12px 14px; border: 1px solid #eeedf6; border-radius: 10px; background: #f8f7fc; color: #73718b; font-size: 12px; line-height: 1.6; }
     @media (max-width: 680px) { main { grid-template-columns: 1fr; max-width: 440px; } .intro { gap: 28px; padding: 30px; } .intro p, .status { display: none; } h1 { font-size: 30px; margin-bottom: 0; } .login { padding: 32px 30px; } }
-    @media (prefers-reduced-motion: reduce) { input, button { transition: none; } }
+    @media (prefers-reduced-motion: reduce) { input, .sign-in { transition: none; } }
   </style>
 </head>
 <body>
@@ -56,8 +56,8 @@
         <label for="password">Password</label>
         <input id="password" type="password" autocomplete="current-password" placeholder="Enter your password" aria-describedby="preview-notice">
       </div>
-      <button type="button" aria-describedby="preview-notice">Sign in</button>
-      <p class="notice" id="preview-notice">Preview only. The Sign in button has no action yet. Nothing you enter is submitted.</p>
+      <a class="sign-in" href="/back-office" aria-describedby="preview-notice">Sign in</a>
+      <p class="notice" id="preview-notice">Demo only. No username or password required. Nothing you enter is submitted.</p>
     </section>
   </main>
 </body>
