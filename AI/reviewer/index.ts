@@ -147,6 +147,36 @@ function environmentSecrets(): string[] {
     .map(([, value]) => value ?? '').filter(Boolean);
 }
 
+// GitHub custom validation messages can quote submitted content. Only expose
+// known rules and schema labels; never stringify an error's value or raw body.
+function githubValidationDetails(errors: unknown): string[] {
+  if (!Array.isArray(errors)) return [];
+  const resources = ['PullRequest', 'PullRequestReview', 'PullRequestReviewComment', 'PullRequestReviewThread', 'ReviewComment', 'ReviewThread'];
+  const fields = ['body', 'event', 'commit_id', 'comments', 'review_comments', 'review_threads', 'path', 'line', 'side', 'position', 'start_line', 'start_side'];
+  const codes = ['invalid', 'missing', 'missing_field', 'already_exists', 'custom', 'unprocessable', 'not_found'];
+  const rules: [RegExp, string][] = [
+    [/^(?:Pull request review thread )?line must be part of the diff\.?$/i, 'inline line must be part of the diff'],
+    [/^(?:Pull request review thread )?diff hunk (?:can't|cannot) be blank\.?$/i, 'inline diff hunk cannot be blank'],
+    [/^Review (?:comments|threads) (?:is|are) invalid\.?$/i, 'inline review comments or threads are invalid'],
+    [/^(?:Pull request review thread )?path (?:can't|cannot) be blank\.?$/i, 'inline path cannot be blank'],
+    [/^Body (?:can't|cannot) be blank\.?$/i, 'review body cannot be blank'],
+    [/^(?:Can not|Cannot|You cannot) approve your own pull request\.?$/i, 'reviewer cannot approve its own PR'],
+    [/^(?:Can not|Cannot|You cannot) request changes on your own pull request\.?$/i, 'reviewer cannot request changes on its own PR'],
+    [/^User can only have one pending review per pull request\.?$/i, 'reviewer already has a pending review'],
+    [/^(?:Position|Line|Side|Path) is invalid\.?$/i, 'inline location field is invalid'],
+    [/^Commit(?:_id| SHA)? is not part of the pull request\.?$/i, 'review commit is not part of the PR']
+  ];
+  return errors.slice(0, 5).map((item, index) => {
+    const detail = item && typeof item === 'object' && !Array.isArray(item) ? item as Record<string, unknown> : {};
+    const labels: string[] = [];
+    for (const [key, allowed] of [['resource', resources], ['field', fields], ['code', codes]] as const)
+      if (typeof detail[key] === 'string') labels.push(`${key}: ${allowed.includes(detail[key]) ? detail[key] : 'unrecognized (withheld)'}`);
+    const message = typeof item === 'string' ? item : detail.message;
+    if (typeof message === 'string') labels.push(rules.find(([pattern]) => pattern.test(message))?.[1] ?? 'custom validation message withheld');
+    return `errors[${index}]: ${labels.join(', ') || 'unrecognized validation detail (withheld)'}`;
+  }).concat(errors.length > 5 ? ['additional validation errors omitted'] : []);
+}
+
 // Read only diagnostic fields, never log complete responses, headers, or requests.
 export async function httpError(service: string, response: Response): Promise<Error> {
   const error = new Error(`${service} HTTP ${response.status} ${response.statusText}`);
@@ -161,6 +191,10 @@ export async function httpError(service: string, response: Response): Promise<Er
       for (const field of ['code', 'type'] as const)
         if (typeof detail[field] === 'string' || typeof detail[field] === 'number')
           Object.assign(error, { [field]: detail[field] });
+      if (service.startsWith('GitHub')) {
+        const validation = githubValidationDetails(root.errors);
+        if (validation.length) error.message += `; ${validation.join('; ')}`;
+      }
     }
   } catch { /* Preserve HTTP status when the response is not JSON. */ }
   return error;
@@ -202,7 +236,7 @@ export async function main() {
     const response = await fetch(url, { method, redirect: 'error', signal: AbortSignal.timeout(30_000),
       headers: { Authorization: `Bearer ${token}`, Accept: accept, 'Content-Type': 'application/json',
         'X-GitHub-Api-Version': '2022-11-28' }, body: body ? JSON.stringify(body) : undefined });
-    if (!response.ok) throw await httpError('GitHub', response);
+    if (!response.ok) throw await httpError(method === 'POST' && url === `${base}/reviews` ? 'GitHub review submission' : 'GitHub', response);
     return accept.includes('diff') ? response.text() : response.json();
   }
   const pr = await github(base);
