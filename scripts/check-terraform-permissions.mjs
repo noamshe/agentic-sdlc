@@ -69,7 +69,9 @@ const specs = {
     attributes: ['statement_id', 'statement_id_prefix', 'action', 'function_name', 'principal', 'source_arn', 'region'], extended: true
   },
   archive_file: {
-    attributes: ['type', 'source_file', 'output_path'], mode: 'data', provider: ARCHIVE, local: true
+    // Both modes package local files only; neither requires AWS authorization.
+    // https://registry.terraform.io/providers/hashicorp/archive/latest/docs/data-sources/file
+    attributes: ['type', 'source_file', 'source_dir', 'output_path'], mode: 'data', provider: ARCHIVE, local: true
   }
 };
 

@@ -24,6 +24,20 @@ day. Each execution role can write only to its own log group; only the outer
 role may invoke the specific inner function. The inner function has no public
 endpoint and no permission to invoke the outer function.
 
-Terraform packages each source file into a generated, Git-ignored ZIP. The
-deployer/checker roles, permission checker, and GitHub workflows are unchanged.
+The outer entry point `hello/index.mjs` exports the router in `hello/routes.mjs`.
+Its explicit `GET /hello` mapping calls `hello/handlers/hello.mjs`; unknown
+method/path pairs return 404. API Gateway still exposes `GET /hello` explicitly
+in Terraform. The inner Lambda also exports its router from `index.mjs`:
+`new-inner-lambda-test/routes.mjs` maps the internal action `hello` to
+`handlers/hello.mjs`. The outer Lambda sends `{ "action": "hello" }` in its
+synchronous invocation. Unsupported actions fail; this router exposes no
+public HTTP endpoint.
+
+Application entry points are `hello/index.mjs` and
+`new-inner-lambda-test/index.mjs`. Terraform definitions remain in
+`infra/lambda.tf` and `infra/inner-lambda.tf`, with routing in `infra/api.tf`.
+Terraform packages each application directory into an ignored ZIP under
+`build/lambdas/`. Each function uses `index.handler` and the archive's
+`output_base64sha256` as `source_code_hash`, so changed code triggers an update.
+Both Terraform workflows watch `src/lambdas/**` as well as `infra/**`.
 No AWS resources are deployed by local tests or validation.

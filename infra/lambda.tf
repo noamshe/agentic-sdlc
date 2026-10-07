@@ -4,8 +4,8 @@ locals {
 
 data "archive_file" "lab_lambda" {
   type        = "zip"
-  source_file = "${path.module}/lambda/index.mjs"
-  output_path = "${path.module}/lambda/function.zip"
+  source_dir  = "${path.module}/../src/lambdas/hello"
+  output_path = "${path.module}/../build/lambdas/hello.zip"
 }
 
 resource "aws_iam_role" "lab_lambda" {

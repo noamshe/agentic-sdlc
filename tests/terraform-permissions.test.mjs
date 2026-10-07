@@ -230,6 +230,10 @@ test('workflow contains no apply, no PR write permission, and uses a read-only p
   assert.match(workflow, /github-terraform-plan-checker/);
   assert.ok(!workflow.includes('needs:'));
   assert.ok(!workflow.includes('pull_request_target'));
+  assert.match(workflow, /paths:\s*\n\s*- 'infra\/\*\*'\s*\n\s*- 'src\/lambdas\/\*\*'/);
+  const deployment = readFileSync('.github/workflows/terraform-deploy.yml', 'utf8');
+  assert.match(deployment, /paths:\s*\n\s*- 'infra\/\*\*'\s*\n\s*- 'src\/lambdas\/\*\*'/);
+  assert.match(deployment, /github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/);
 });
 
 const executionRole = 'arn:aws:iam::240742387601:role/lab-execution';
@@ -340,7 +344,7 @@ function lambdaCreationPlan() {
   configs.find(r => r.type === 'aws_iam_role_policy').expressions.role = { references: ['aws_iam_role.lab_lambda.id', 'aws_iam_role.lab_lambda'] };
   result.configuration.provider_config.archive = { full_name: 'registry.terraform.io/hashicorp/archive', expressions: {} };
   configs.push({ address: 'data.archive_file.lab_lambda', type: 'archive_file', mode: 'data', provider_config_key: 'archive',
-    expressions: { type: { constant_value: 'zip' }, source_file: {}, output_path: {} } });
+    expressions: { type: { constant_value: 'zip' }, source_dir: {}, output_path: {} } });
   return result;
 }
 
@@ -369,6 +373,20 @@ test('archive read is explicitly local, generates no AWS actions, and rejects ot
   assert.ok(result.requirements.every(r => r.reasons.every(reason => !reason.includes('archive_file'))));
   archive.provider_name = provider;
   assert.ok(requiredPermissions(input, backend).issues.length);
+});
+
+test('directory archives are supported as local packaging without adding AWS action requirements', () => {
+  const input = lambdaCreationPlan();
+  input.resource_changes = [{ address: 'data.archive_file.lab_lambda', type: 'archive_file', mode: 'data',
+    provider_name: 'registry.terraform.io/hashicorp/archive', change: { actions: ['read'], before: null,
+      after: { type: 'zip', source_dir: '../src/lambdas/hello', output_path: '../build/lambdas/hello.zip' } } }];
+  input.configuration.root_module.resources = input.configuration.root_module.resources.filter(item => item.type === 'archive_file');
+  const result = requiredPermissions(input, backend);
+  assert.deepEqual(result.issues, []);
+  assert.deepEqual(result.noAwsPermissions, ['data.archive_file.lab_lambda']);
+  assert.deepEqual(result.requirements, requiredPermissions(plan([]), backend).requirements);
+  input.configuration.root_module.resources[0].expressions.unsupported_packager = {};
+  assert.ok(requiredPermissions(input, backend).issues.some(issue => issue.includes('Unmapped configuration')));
 });
 
 test('unknown role references are never inferred from non-direct HCL or references alone', () => {

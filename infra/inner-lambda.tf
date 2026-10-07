@@ -4,8 +4,8 @@ locals {
 
 data "archive_file" "inner_lambda" {
   type        = "zip"
-  source_file = "${path.module}/inner-lambda/index.mjs"
-  output_path = "${path.module}/inner-lambda/function.zip"
+  source_dir  = "${path.module}/../src/lambdas/new-inner-lambda-test"
+  output_path = "${path.module}/../build/lambdas/new-inner-lambda-test.zip"
 }
 
 resource "aws_iam_role" "inner_lambda" {

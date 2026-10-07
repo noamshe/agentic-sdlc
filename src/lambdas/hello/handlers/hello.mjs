@@ -6,7 +6,7 @@ export const createHandler = invokeInner => async () => {
   const result = await invokeInner({
     FunctionName: 'new-inner-lambda-test',
     InvocationType: 'RequestResponse',
-    Payload: Buffer.from('{}')
+    Payload: Buffer.from(JSON.stringify({ action: 'hello' }))
   });
   // A synchronous invocation can return HTTP 200 even when the function failed.
   if (result.StatusCode !== 200 || result.FunctionError)

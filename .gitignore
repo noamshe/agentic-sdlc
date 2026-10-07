@@ -19,6 +19,5 @@ override.tf.json
 .terraformrc
 terraform.rc
 
-# Generated Lambda deployment package
-/infra/lambda/function.zip
-/infra/inner-lambda/function.zip
+# Generated build artifacts
+/build/

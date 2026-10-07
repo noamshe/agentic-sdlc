@@ -1,6 +1,6 @@
 # Terraform permission check
 
-`.github/workflows/terraform-permission-check.yml` is an independent PR check for changes under `infra/**` targeting `main`. It does not depend on or change AI review or deployment. Its concurrency group is separate, so all checks can run in parallel. Fork PRs are skipped rather than receiving AWS/state access.
+`.github/workflows/terraform-permission-check.yml` is an independent PR check for changes under `infra/**` or `src/lambdas/**` targeting `main`. It does not depend on AI review or deployment. Its concurrency group is separate, so all checks can run in parallel. Fork PRs are skipped rather than receiving AWS/state access.
 
 The workflow uses GitHub OIDC to assume `github-terraform-plan-checker` in account `240742387601`, in `eu-west-1`. It initializes the existing S3 backend from `infra/versions.tf`, checks formatting, validates, and saves a refreshed plan locally. `plan -lock=false` avoids state lock writes; it never applies or persists refreshed state. The default workspace is used, matching the current deployment. No state or plan artifacts are uploaded, and temporary plan files are removed.
 
@@ -33,7 +33,7 @@ These additions were checked against the AWS provider **v6.67.0** used by the fa
 | `aws_iam_role` | `iam:GetRole`, `iam:ListRolePolicies`, `iam:GetRolePolicy`, `iam:ListAttachedRolePolicies` | Concrete role ARN including its known path. Policy reads cover the provider's inline-policy refresh loop. |
 | `aws_iam_role_policy` | `iam:GetRolePolicy` | The concrete parent role ARN, not an invented inline-policy ARN. |
 | `aws_lambda_function` | `lambda:GetFunction`, `lambda:ListTags`, `lambda:ListVersionsByFunction`, `lambda:GetFunctionCodeSigningConfig` | Unqualified `arn:aws:lambda:eu-west-1:240742387601:function:NAME` for the supported ZIP configuration. |
-| `data.archive_file` | None | Explicitly supported local `type`, `source_file`, `output_path` configuration, even when already resolved and absent from `resource_changes`. Shown separately in the summary; no IAM simulation for the archive. |
+| `data.archive_file` | None | Explicitly supported local `type`, `source_file` or `source_dir`, and `output_path` configuration, even when already resolved and absent from `resource_changes`. Shown separately in the summary; no IAM simulation for the archive. |
 
 Tag additions/changes require `iam:TagRole`, `logs:TagResource`, or `lambda:TagResource`; removals require the corresponding `UntagRole`/`UntagResource`. Unknown configured tags fail. Computed `tags_all` on an untagged create does not represent a tagging request when the provider has no default tags (provider settings beyond the region remain unsupported).
 
