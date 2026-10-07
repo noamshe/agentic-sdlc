@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { requiredPermissions, directRoleBindings, simulate, report, s3Buckets, verifyRoleProfiles } from '../scripts/check-terraform-permissions.mjs';
+import { requiredPermissions, directRoleBindings, simulate, report, failureAnnotations, s3Buckets, verifyRoleProfiles } from '../scripts/check-terraform-permissions.mjs';
 
 const provider = 'registry.terraform.io/hashicorp/aws';
 const backend = { backend: { type: 's3', config: {
@@ -130,6 +130,96 @@ test('simulation pagination is read completely and invalid truncation fails', as
   assert.equal(calls, 2); assert.equal(results[0].allowed, true);
   await assert.rejects(simulate([requirement], async () => ({ EvaluationResults: [], IsTruncated: true })),
     /Incomplete IAM simulation/);
+});
+
+test('failure output deduplicates denied pairs and suggests only their exact scopes and conditions', () => {
+  const denied = { action: 'iam:PassRole', resource: 'arn:aws:iam::240742387601:role/lab-execution',
+    allowed: false, outcome: 'denied', decision: 'implicitDeny', context: [
+      { ContextKeyName: 'iam:PassedToService', ContextKeyValues: ['lambda.amazonaws.com'], ContextKeyType: 'string' }
+    ] };
+  const unverified = { action: 'lambda:CreateFunction', resource: 'arn:aws:lambda:eu-west-1:240742387601:function:lab',
+    allowed: false, outcome: 'unverified', decision: 'missing context: aws:SourceIp' };
+  const verified = { action: 'lambda:GetFunction', resource: unverified.resource, allowed: true, decision: 'allowed' };
+  const results = [denied, { ...denied }, unverified, verified];
+  const issues = ['Unsupported resource/data source: aws_unknown.lab'];
+  assert.deepEqual(failureAnnotations(results, issues), [
+    `::error::Denied deployer permission: ${denied.action} on ${denied.resource}`,
+    `::error::Unverified deployer permission: ${unverified.action} on ${unverified.resource}`,
+    `::error::Cannot verify deployer permissions: ${issues[0]}`
+  ]);
+  const summary = report(results, issues);
+  assert.match(summary, /\| Required IAM action \| Resource \|/); // Detailed table preserved.
+  assert.match(summary, /FAIL/);
+  const final = summary.split('### Final failure summary')[1];
+  assert.equal(final.split(`- ${denied.action} → ${denied.resource}`).length - 1, 1);
+  assert.ok(!final.includes(verified.action));
+  assert.match(final, /Unresolved \/ unverified.*\n.*lambda:CreateFunction/);
+  assert.match(final, /Suggested IAM policy/);
+  const policy = JSON.parse(final.match(/```json\n([\s\S]*?)\n```/)[1]);
+  assert.deepEqual(policy, { Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: ['iam:PassRole'],
+    Resource: [denied.resource], Condition: { StringEquals: { 'iam:PassedToService': ['lambda.amazonaws.com'] } } }] });
+});
+
+test('unverified-only failures never suggest grants, while successful checks emit no errors or policy', () => {
+  const result = { action: 's3:ListBucket', resource: 'arn:aws:s3:::lab-state', allowed: false, decision: 'not evaluated' };
+  const failure = report([result], ['Simulation could not complete']);
+  assert.match(failure, /Denied IAM actions and resource scopes:\n- none/);
+  assert.match(failure, /No policy suggested/);
+  assert.ok(!failure.includes('```json'));
+  assert.match(failure, /FAIL/);
+  const allowed = { ...result, allowed: true, decision: 'allowed' };
+  assert.deepEqual(failureAnnotations([allowed], []), []);
+  assert.match(report([allowed], []), /PASS/);
+  assert.ok(!report([allowed], []).includes('Suggested IAM policy'));
+});
+
+test('annotations escape workflow commands and duplicate unresolved issues', () => {
+  const issue = 'bad%\r\n::warning::injected';
+  assert.deepEqual(failureAnnotations([], [issue, issue]),
+    ['::error::Cannot verify deployer permissions: bad%25%0D%0A::warning::injected']);
+});
+
+test('policy output deduplicates scopes while retaining condition alternatives without cross-products', () => {
+  const pair = { action: 'iam:DetachRolePolicy', resource: 'arn:aws:iam::240742387601:role/lab',
+    allowed: false, decision: 'implicitDeny' };
+  const context = value => [{ ContextKeyName: 'iam:PolicyARN', ContextKeyValues: [value], ContextKeyType: 'string' }];
+  const results = [{ ...pair, context: context('arn:aws:iam::aws:policy/First') },
+    { ...pair, context: context('arn:aws:iam::aws:policy/Second') },
+    { ...pair, resource: pair.resource + '-other' }];
+  const output = report(results, []);
+  const policy = JSON.parse(output.match(/```json\n([\s\S]*?)\n```/)[1]);
+  assert.equal(failureAnnotations(results, []).length, 2);
+  assert.equal(policy.Statement.length, 2);
+  assert.deepEqual(policy.Statement[0].Condition.StringEquals['iam:PolicyARN'],
+    ['arn:aws:iam::aws:policy/First', 'arn:aws:iam::aws:policy/Second']);
+  const ambiguous = report([results[0], { ...pair, context: [
+    ...context('arn:aws:iam::aws:policy/Second'),
+    { ContextKeyName: 'aws:Other', ContextKeyValues: ['value'], ContextKeyType: 'string' }
+  ] }], []);
+  assert.ok(!ambiguous.includes('```json'));
+  assert.match(ambiguous, /differing condition contexts require manual review/);
+  assert.match(ambiguous, /FAIL/);
+});
+
+test('simulation distinguishes real denials from incomplete verification without changing failure decisions', async () => {
+  const requirement = { action: 's3:ListBucket', resource: 'arn:aws:s3:::lab-bucket' };
+  for (const [details, outcome] of [
+    [{ EvalDecision: 'implicitDeny' }, 'denied'],
+    [{ EvalDecision: 'explicitDeny' }, 'denied'],
+    [{ EvalDecision: 'allowed', PermissionsBoundaryDecisionDetail: { AllowedByPermissionsBoundary: false } }, 'denied'],
+    [{ EvalDecision: 'allowed', OrganizationsDecisionDetail: { AllowedByOrganizations: false } }, 'denied'],
+    [{ EvalDecision: 'allowed', ResourceSpecificResults: [{ EvalResourceDecision: 'explicitDeny' }] }, 'denied'],
+    [{ EvalDecision: 'implicitDeny', MissingContextValues: ['aws:SourceIp'] }, 'unverified'],
+    [{ EvalDecision: 'allowed', ResourceSpecificResults: [{ EvalResourceDecision: 'allowed', MissingContextValues: ['aws:SourceIp'] }] }, 'unverified']
+  ]) {
+    const [result] = await simulate([requirement], async () => ({ EvaluationResults: [{
+      EvalActionName: requirement.action, EvalResourceName: requirement.resource, ...details
+    }] }));
+    assert.equal(result.allowed, false);
+    assert.equal(result.outcome, outcome);
+  }
+  const [missing] = await simulate([requirement], async () => ({ EvaluationResults: [] }));
+  assert.equal(missing.outcome, 'unverified');
 });
 
 test('workflow contains no apply, no PR write permission, and uses a read-only plan', () => {
