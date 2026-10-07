@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>How it works · Agentic SDLC Lab</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #17213b; background: #f5f7fc; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header { background: #202442; color: #fff; }
+    .bar { max-width: 1160px; margin: auto; padding: 22px 28px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 20px; }
+    .brand { font-size: 15px; font-weight: 650; }
+    .brand span { color: #b9b5ef; font-family: monospace; margin-right: 10px; }
+    nav { display: flex; flex-wrap: wrap; gap: 10px; }
+    nav a { color: inherit; text-decoration: none; padding: 10px 16px; border: 1px solid #ffffff40; border-radius: 10px; font-size: 14px; }
+    nav a:hover { background: #ffffff15; }
+    nav a[aria-current] { background: #6554cf; border-color: #8f80e8; }
+    a:focus-visible { outline: 3px solid #a99df5; outline-offset: 4px; }
+    main { max-width: 1160px; margin: auto; padding: 40px 28px 48px; }
+    .hero { display: grid; grid-template-columns: 1.15fr 1fr; gap: 32px; align-items: center; padding: 36px; border: 1px solid #e0dbf5; border-radius: 24px; background: linear-gradient(120deg, #eeebff, #fff 75%); }
+    .eyebrow { color: #6554cf; text-transform: uppercase; font-size: 11px; font-weight: 700; letter-spacing: .15em; }
+    h1 { font-size: clamp(32px, 4.5vw, 48px); letter-spacing: -.045em; line-height: 1.12; margin: 16px 0; }
+    p { line-height: 1.7; }
+    .hero p { color: #666e84; font-size: 15px; margin: 0; max-width: 460px; }
+    .hero svg { display: block; width: 100%; height: auto; }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin: 24px 0 36px; }
+    .stat { background: #fff; border: 1px solid #e5e8f0; border-radius: 16px; padding: 22px; }
+    .stat dt { font-size: 12px; color: #666e84; }
+    .stat dd { margin: 8px 0 0; font-size: 28px; font-weight: 650; letter-spacing: -.03em; }
+    .section-heading { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 20px; }
+    h2 { margin: 0; font-size: 24px; letter-spacing: -.035em; }
+    .badge { font-size: 12px; padding: 6px 12px; border-radius: 30px; background: #eeebff; color: #554991; }
+    .steps { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(6, 1fr); gap: 20px; }
+    .step { grid-column: span 2; background: #fff; border: 1px solid #e5e8f0; border-radius: 18px; overflow: hidden; }
+    .step:nth-child(n+4) { grid-column: span 3; }
+    .art { height: 148px; display: grid; place-items: center; background: #eee9fb; }
+    .step:nth-child(2) .art { background: #e3eef8; }
+    .step:nth-child(3) .art { background: #e6efe7; }
+    .step:nth-child(4) .art { background: #fff0df; }
+    .step:nth-child(5) .art { background: #e1eef0; }
+    .art svg { width: 210px; height: 120px; }
+    .copy { padding: 24px; }
+    .step-label { font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: #6554cf; display: flex; align-items: center; gap: 10px; }
+    .number { display: grid; place-items: center; width: 30px; height: 30px; background: #eeebff; border-radius: 9px; font-size: 14px; }
+    h3 { font-size: 20px; letter-spacing: -.025em; margin: 14px 0 8px; }
+    .copy p { color: #666e84; font-size: 14px; margin: 0; }
+    .detail { border-top: 1px solid #eceef4; margin-top: 18px; padding-top: 14px; font-size: 12px; color: #554991; line-height: 1.6; }
+    .checks { margin: 14px 0 0; padding-left: 18px; color: #666e84; font-size: 13px; line-height: 1.7; }
+    .principle { background: #202442; color: #fff; border-radius: 18px; padding: 28px 32px; margin-top: 28px; display: grid; grid-template-columns: 1fr 1.5fr; gap: 24px; align-items: center; }
+    .principle h2 { font-size: 22px; }
+    .principle p { color: #ced0e2; margin: 0; font-size: 14px; }
+    footer { margin-top: 24px; font-size: 12px; color: #727a8e; }
+    @media (max-width: 850px) { .hero { grid-template-columns: 1fr; } .hero svg { max-width: 430px; margin: auto; } .step, .step:nth-child(n+4) { grid-column: span 3; } .step:last-child { grid-column: span 6; } }
+    @media (max-width: 560px) { main { padding: 24px 18px; } .bar { padding: 18px; } .hero { padding: 24px; gap: 20px; } .stats { gap: 8px; } .stat { padding: 16px 10px; } .stat dd { font-size: 22px; } .steps { grid-template-columns: 1fr; } .step, .step:nth-child(n+4), .step:last-child { grid-column: auto; } .principle { grid-template-columns: 1fr; padding: 24px; gap: 12px; } }
+  </style>
+</head>
+<body>
+  <header><div class="bar"><div class="brand"><span aria-hidden="true">&gt;_</span>Agentic SDLC Lab</div><nav aria-label="Workspace"><a href="/back-office">Back office</a><a href="/agentic-flow" aria-current="page">How it works</a><a href="/login">Log out</a></nav></div></header>
+  <main>
+    <section class="hero" aria-labelledby="flow-title">
+      <div><span class="eyebrow">From idea to running software</span><h1 id="flow-title">One idea.<br>Five thoughtful steps.</h1><p>Codex builds. Automated checks review. A human decides what ships. Follow the journey from a new branch to code and infrastructure running together.</p></div>
+      <svg viewBox="0 0 440 250" role="img" aria-labelledby="journey-title"><title id="journey-title">A code branch passes through review and checks before joining main and deploying</title><rect x="8" y="8" width="424" height="234" rx="24" fill="#202442"/><path d="M60 65H200Q240 65 240 105V150Q240 185 280 185H380" fill="none" stroke="#b8acf6" stroke-width="5"/><path d="M60 185H380" stroke="#6fa5a9" stroke-width="5"/><circle cx="65" cy="65" r="15" fill="#b8acf6"/><circle cx="168" cy="65" r="15" fill="#b8acf6"/><circle cx="240" cy="128" r="15" fill="#a6cdb0"/><circle cx="285" cy="185" r="15" fill="#f4c698"/><circle cx="380" cy="185" r="15" fill="#83c3c8"/><g fill="#fff" font-family="system-ui, sans-serif" font-size="13"><text x="40" y="40">Code</text><text x="144" y="40">Review</text><text x="267" y="133">Checks</text><text x="264" y="220">Merge</text><text x="358" y="220">Ship</text><text x="35" y="217" fill="#b1b8d3">main</text></g></svg>
+    </section>
+    <dl class="stats" aria-label="Workflow at a glance"><div class="stat"><dt>From idea to deployment</dt><dd>5 stages</dd></div><div class="stat"><dt>Before the merge</dt><dd>2 checks</dd></div><div class="stat"><dt>Final merge decision</dt><dd>Human</dd></div></dl>
+    <section aria-labelledby="stages-title">
+      <div class="section-heading"><h2 id="stages-title">The path to production</h2><span class="badge">Our agentic workflow</span></div>
+      <ol class="steps">
+        <li class="step"><div class="art"><svg viewBox="0 0 210 120" aria-hidden="true"><rect x="25" y="14" width="160" height="92" rx="12" fill="#282747"/><circle cx="40" cy="28" r="3" fill="#f4c698"/><circle cx="52" cy="28" r="3" fill="#a6cdb0"/><path d="m48 51 12 10-12 10m25 0h20m-45 17h95" fill="none" stroke="#b8acf6" stroke-width="5" stroke-linecap="round"/></svg></div><div class="copy"><div class="step-label"><span class="number">1</span> Create</div><h3>Codex builds the idea</h3><p>A request becomes a focused change on a new Git branch. Codex follows the project structure, writes the code, and runs relevant local tests.</p><div class="detail">Output: a tested branch, ready to share.</div></div></li>
+        <li class="step"><div class="art"><svg viewBox="0 0 210 120" aria-hidden="true"><rect x="34" y="12" width="142" height="96" rx="12" fill="#fff"/><path d="M66 38v45m0-25h33q15 0 15 15v10" fill="none" stroke="#658db7" stroke-width="5"/><g fill="#658db7"><circle cx="66" cy="35" r="8"/><circle cx="66" cy="85" r="8"/><circle cx="114" cy="85" r="8"/></g><path d="M133 38h22m-22 14h16" stroke="#b7cee4" stroke-width="5" stroke-linecap="round"/></svg></div><div class="copy"><div class="step-label"><span class="number">2</span> Propose</div><h3>Open a pull request</h3><p>The branch is pushed and a pull request explains the change, its purpose, and how it was tested. The diff makes the proposal easy to inspect.</p><div class="detail">Output: a reviewable proposal against main.</div></div></li>
+        <li class="step"><div class="art"><svg viewBox="0 0 210 120" aria-hidden="true"><rect x="30" y="12" width="150" height="96" rx="12" fill="#fff"/><g fill="none" stroke="#6e9270" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"><path d="m48 41 6 6 12-14m-18 44 6 6 12-14"/><path d="M84 40h70M84 76h70" stroke="#bbd1bd"/></g></svg></div><div class="copy"><div class="step-label"><span class="number">3</span> Verify</div><h3>Two checks, different jobs</h3><p>Eligible, non-draft PRs within this repository get complementary checks through GitHub Actions.</p><ul class="checks"><li><strong>AI reviewer:</strong> reads the PR diff and policy, then posts findings and a review decision.</li><li><strong>Permission checker:</strong> when infra files change, creates a read-only Terraform plan and simulates the deployer's AWS permissions.</li></ul><div class="detail">No infra file changes? The permission workflow is skipped. The AI reviewer does not execute PR code.</div></div></li>
+        <li class="step"><div class="art"><svg viewBox="0 0 210 120" aria-hidden="true"><path d="M48 24v72m114-72v28q0 24-38 24H48" fill="none" stroke="#bf8656" stroke-width="6"/><g fill="#f4c698" stroke="#bf8656" stroke-width="4"><circle cx="48" cy="24" r="10"/><circle cx="48" cy="96" r="10"/><circle cx="162" cy="24" r="10"/></g><path d="m97 40 9 9 18-19" fill="none" stroke="#bf8656" stroke-width="5" stroke-linecap="round"/></svg></div><div class="copy"><div class="step-label"><span class="number">4</span> Decide</div><h3>A human merges to main</h3><p>Review the findings, fix issues, and re-run checks as needed. A human makes the merge decision, bringing the reviewed change into the main branch.</p><div class="detail">AI approval is review feedback; it does not authorize a production deployment.</div></div></li>
+        <li class="step"><div class="art"><svg viewBox="0 0 210 120" aria-hidden="true"><path d="M56 81a24 24 0 0 1 0-48 35 35 0 0 1 65-8 28 28 0 0 1 31 56Z" fill="#fff"/><path d="M105 93V48m-16 16 16-16 16 16" fill="none" stroke="#368d9e" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="copy"><div class="step-label"><span class="number">5</span> Deliver</div><h3>Terraform ships the change</h3><p>After a merge affecting infra or Lambda code, the deployment workflow initializes, validates, and plans Terraform, then applies the saved plan. Lambda packages and infrastructure are updated together.</p><div class="detail">The deployment workflow uses its AWS deployment role. Unrelated changes do not trigger it.</div></div></li>
+      </ol>
+    </section>
+    <aside class="principle"><h2>Automation with a human at the helm.</h2><p>Agents accelerate the work. Reviews and permission checks make changes easier to assess. Human judgment remains part of the journey from a request to a release.</p></aside>
+    <footer>This page explains the workflow; it does not start reviews, merge code, or deploy resources.</footer>
+  </main>
+</body>
+</html>

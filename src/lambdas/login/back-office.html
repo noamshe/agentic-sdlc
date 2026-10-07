@@ -13,8 +13,10 @@
     .brand { font-weight: 650; font-size: 15px; }
     .brand span { color: #b9b5ef; margin-right: 10px; font-family: monospace; }
     a { color: inherit; }
-    .logout { text-decoration: none; padding: 10px 18px; border: 1px solid #ffffff40; border-radius: 10px; font-size: 14px; white-space: nowrap; }
-    .logout:hover { background: #ffffff15; }
+    nav { display: flex; flex-wrap: wrap; gap: 10px; }
+    .bar { flex-wrap: wrap; }
+    .nav-link, .logout { text-decoration: none; padding: 10px 18px; border: 1px solid #ffffff40; border-radius: 10px; font-size: 14px; white-space: nowrap; }
+    .nav-link:hover, .logout:hover { background: #ffffff15; }
     a:focus-visible { outline: 3px solid #a99df5; outline-offset: 4px; }
     main { max-width: 1160px; margin: auto; padding: 44px 28px 56px; }
     .eyebrow { color: #6554cf; text-transform: uppercase; font-size: 11px; font-weight: 700; letter-spacing: .15em; }
@@ -40,7 +42,7 @@
   </style>
 </head>
 <body>
-  <header><div class="bar"><div class="brand"><span aria-hidden="true">&gt;_</span>Agentic SDLC Lab</div><nav aria-label="Account"><a class="logout" href="/login">Log out</a></nav></div></header>
+  <header><div class="bar"><div class="brand"><span aria-hidden="true">&gt;_</span>Agentic SDLC Lab</div><nav aria-label="Workspace"><a class="nav-link" href="/agentic-flow">How it works</a><a class="logout" href="/login">Log out</a></nav></div></header>
   <main>
     <span class="eyebrow">Demo workspace</span>
     <h1>Welcome to your back office</h1>
