@@ -1,128 +1,101 @@
 # Extending the Terraform permission checker
 
-## Purpose and trigger
+This is an incremental agentic-SDLC lab. Prefer a small, correct extension completed quickly. Add support for the next unsupported type when it appears; do not solve future resource types or every theoretical configuration variant upfront.
 
-Follow this procedure whenever a user provides unsupported Terraform resource or data-source items from a failed GitHub Actions permission check. Treat that list as the starting point for investigation; the user should not need to supply IAM action mappings or repeat this procedure.
+## Fast path by default
 
-Read `AI/global-rules.md` and follow its principles. Extend the repository's existing checker without modifying AWS, granting permissions, or bypassing the failing check. A denied permission is a finding to report, not something to repair by changing an IAM policy.
+Treat the unsupported resource/data-source types or failure output supplied by the user as the task scope and starting input.
 
-## Architecture
+- Do not reconstruct the failed GitHub Actions run or retrieve GitHub logs unless the user explicitly asks.
+- Do not regenerate a Terraform plan unless the supplied information and relevant configuration are insufficient to understand the resource. Any necessary plan must use read-only credentials, no state writes, and locking disabled.
+- A failed-run plan is not a prerequisite for a straightforward mapping extension. Ask only for information that is genuinely needed; leave unresolved cases unverified.
+
+## Inspect minimum files
+
+Start only with:
+
+1. `scripts/check-terraform-permissions.mjs`
+2. `tests/terraform-permissions.test.mjs`
+3. The Terraform file defining the unsupported resource/data source.
+
+Inspect additional files only when directly necessary, such as a referenced dependency needed to determine an ARN. Do not inspect the whole repository, workflow history, backend configuration, or unrelated Terraform resources for each extension. Preserve existing repository safety principles.
+
+## Research only the required mapping
+
+For each reported type, identify the Terraform operations and configuration being supported, then determine the AWS APIs and exact IAM actions the provider needs.
+
+- Use official HashiCorp Terraform AWS Provider documentation/source and official AWS IAM documentation, including the Service Authorization Reference, as necessary. Consult the relevant provider version/source when actual calls are unclear.
+- Verify IAM action names, resource scopes, conditions, and relevant dependent permissions such as `iam:PassRole`, tagging, or KMS. Never invent IAM actions or assume an SDK operation name is its IAM action name.
+- For local/provider-only data sources, consult that provider's official documentation/source. Explicitly map local `archive_file` packaging to no AWS actions when applicable; do not assign AWS permissions merely because a data source appears in a plan.
+- Record concise authoritative source links in mapping comments or directly relevant documentation.
+- Stop researching once the deterministic mapping can be implemented confidently. Do not perform broad architectural research or investigate hypothetical variants unrelated to the current configuration.
+
+## Extend incrementally
+
+Extend the existing mapping for only the currently unsupported types. Keep this architecture:
 
 ```text
 Terraform plan
-  → extract changed resource/data-source types and operations
-  → deterministic Terraform-to-AWS-action mapping
-  → AWS iam:SimulatePrincipalPolicy against the configured deployment role
-  → allowed/denied or unable to verify
-  → PASS only when everything can be verified
+-> resource/data-source types and operations
+-> deterministic Terraform-to-AWS-action mapping
+-> iam:SimulatePrincipalPolicy against the configured deployment role
+-> allowed / denied / unverified
+-> PASS only when everything is verified
 ```
 
-Include existing resources that require read/refresh permissions, even when their planned operation is no-op. An explicitly supported local/provider-only item can be verified as requiring no AWS actions; do not send an empty action list to IAM simulation.
+Do not create another checker, generically implement an entire AWS service, or introduce LLM calls, runtime research, external inference APIs, or permission-guessing heuristics. Do not alter infrastructure requirements or workflows to bypass a failing check.
 
-The checker is a pre-deployment guardrail. It is not a replacement for AWS IAM authorization during `terraform apply`. A simulation result does not guarantee deployment success or authorize deployment. Preserve and report simulator limitations, including resource policies, policy conditions, session restrictions, and changes after the check.
+Preserve practical operation-aware mappings for the supported configuration:
 
-## Procedure
+- Create: creation actions, necessary post-create reads/waiters, and dependencies.
+- Read/refresh or no-op: required reads, without unrelated mutation actions.
+- Update: actions required by changed attributes and relevant dependencies.
+- Delete: deletion actions and necessary reads/waiters.
+- Replacement: applicable create/delete actions on the correct new/old resources.
 
-### 1. Inspect the failure and its actual inputs
+Do not automatically require create, update, and delete permissions for a plan performing only one operation. Keep concrete resource scopes and required context. Do not fabricate identifiers, assume missing context, or broaden scopes to obtain a pass. Use `Resource: "*"` only for actions that legitimately require it.
 
-- Identify each unsupported type, its provider, whether it is a managed resource or data source, and its Terraform address. Use the actual failure logs to distinguish an unsupported mapping from a denied action or checker authentication/read-access failure.
-- Inspect the relevant `infra/` configuration, referenced modules, provider versions, backend configuration, and dependency lockfile when present.
-- Inspect the actual configuration and Terraform plan that caused the failure. Check the planned actions, before/after values, unknown and sensitive values, dependencies, provider settings, and replacement ordering. Do not infer operations from a type name alone.
-- Locate available plan inputs and logs independently using authorized read-only access. If the failed plan was deleted, state that limitation. A synthetic test fixture is not evidence of what the failed run planned. If a replacement read-only plan is necessary, use the existing workflow/backend and only authorized read-only credentials, with locking disabled and no state writes. Never run apply. Do not execute untrusted provider/data-source code outside the read-only boundary.
-- If the exact plan or essential configuration cannot be obtained, make only changes supported by available evidence, report the gap, and keep affected cases unverified. Request only the missing information needed to finish confidently.
-- Never expose credentials, sensitive plan/state values, or raw secret-bearing artifacts in logs, comments, summaries, or committed fixtures.
+Unknown or genuinely unsupported configuration variants may remain fail-closed. No exhaustive investigation of future variants is required.
 
-### 2. Extend the existing implementation
+## Keep fail-closed and read-only
 
-Inspect these files before editing:
+- Supported item with every required action allowed: verified.
+- Explicitly supported local item requiring no AWS authorization: verified with no AWS action simulation; identify it in the summary.
+- Denied action, unknown resource, unsupported variant, unresolved identifier/permission, missing context, incomplete result, or API error: FAIL/unverified.
 
-- `scripts/check-terraform-permissions.mjs`: extraction, mapping, simulation, and reporting.
-- `tests/terraform-permissions.test.mjs`: existing fixtures and safety expectations.
-- `.github/workflows/terraform-permission-check.yml`: runtime inputs and read-only workflow behavior.
-- `docs/terraform-permission-check.md`: supported scope and documented limitations.
+Preserve existing simulator safeguards, pagination, boundary/Organizations handling, resource-policy restrictions, and other checker safety checks. Never suppress failures, skip required permissions, weaken mappings, or silently authorize unknown cases to make a PR pass.
 
-Add support to the existing mapping and extraction paths. Do not create a second checker, a parallel authorization mechanism, or a separate workflow to bypass unsupported items. Change workflow wiring only when necessary for the existing mechanism. Keep changes scoped to checker support, its tests, and relevant documentation; do not alter infrastructure requirements or the AI reviewer to obtain a pass.
+The checker must remain read-only and continue using `iam:SimulatePrincipalPolicy` against the configured deployment role. Never assume that role or inject allow policies to bypass verification. It is a pre-deployment guardrail, not a replacement for AWS IAM authorization during deployment.
 
-### 3. Research actual IAM requirements
+Safety boundaries:
 
-Use authoritative sources in this order:
+- Never run `terraform apply`.
+- Never create, modify, or delete AWS resources.
+- Never modify AWS IAM roles, policies, attachments, or trust policies, including the checker/deployer roles.
+- Never grant missing permissions automatically; report them instead.
+- Never expose secrets or sensitive plan/state values in source, fixtures, logs, or reports.
+- Preserve the deterministic runtime and fail-closed behavior.
 
-1. Official HashiCorp Terraform AWS Provider documentation for the relevant resource/data source and provider version.
-2. Official AWS Service Authorization Reference to verify exact IAM action names, resource types, dependent actions, and applicable condition keys.
-3. Terraform AWS Provider implementation/source for the relevant version when documentation does not establish which API calls Terraform makes, including refreshes, waiters, and conditional branches.
+## Focused tests, once
 
-For a non-AWS provider such as `hashicorp/archive`, consult that provider's official documentation/source to determine its behavior. Do not assume every data source is local: AWS data sources generally need read permissions, and external/provider-only sources can have effects that require investigation.
+Add focused automated tests for each new mapping: supported operations, exact actions/scopes, relevant dependencies, and unsupported/unknown cases staying failures. Cover zero-AWS-action behavior for local items when added.
 
-Never invent AWS IAM actions. An SDK/API operation name is not necessarily its IAM action name. Verify the mapping, including delete operations authorized by a put/configuration action. Do not use broad service wildcards to hide uncertainty. Record authoritative source links and relevant version assumptions in mapping documentation or comments.
+Use sanitized synthetic plans and mocked AWS responses; tests must not mutate AWS.
 
-Determine actions that the actual configuration and planned operation require, including indirect/dependent permissions. Examples include `iam:PassRole` on the specific role supplied to a service and applicable KMS or tagging permissions. Verify their resource scope and conditions; do not grant these permissions or merely assume they are included in the primary action.
+1. Run the relevant checker tests: `node --test tests/terraform-permissions.test.mjs` (or a directly relevant subset).
+2. Run the full `npm test` suite only if shared checker logic changed or focused tests fail.
+3. Do not rerun passing tests without a reason, such as a subsequent code change or unresolved failure.
 
-### 4. Make deterministic, operation-aware mappings
+Do not claim live AWS verification from mocked tests.
 
-For every newly supported type, define the applicable cases explicitly:
+## Short report and handoff
 
-| Planned operation | Mapping requirement |
-| --- | --- |
-| Create | Creation actions, required post-create reads/waiters, and relevant dependent actions. |
-| Update | Only update actions required by the changed attributes, plus necessary reads/dependencies. Do not automatically require create or delete actions. |
-| Delete | Deletion actions and required reads/waiters. Do not automatically require create/update actions. |
-| Read/refresh or no-op | Actual read/refresh actions; no mutation actions solely because the resource exists. |
-| Replacement | Applicable create and delete actions with correct old/new resource scopes and ordering. |
-| AWS data-source read | Read actions required to resolve that data source. |
-| Local/provider-only item | Explicit support with an empty AWS action mapping, but only when research establishes that no AWS authorization is required. |
+After implementation, report only:
 
-Support `archive_file` as requiring no AWS IAM actions when its inspected use only packages local files. Do not assign AWS permissions merely because it appears in the plan. Ensure provider/configuration validation also accepts the supported local provider so that an empty mapping is not rejected elsewhere.
+- Resource/data-source types added.
+- IAM actions mapped, including relevant dependencies or items requiring no AWS permissions.
+- Files changed.
+- Tests run and results.
+- Anything that remains unsupported or unverified.
 
-Derive action/resource pairs from the real plan and configuration. Preserve concrete ARN scoping, required condition context, account/region checks, backend checks, and existing safety restrictions. If resource identifiers, dependencies, conditions, or required actions cannot be determined confidently, report the case as unverified and fail. Do not fabricate names, use arbitrary sample ARNs, assume missing context, or replace specific scopes with `*` to obtain an allow. Some AWS actions legitimately require `Resource: "*"`; use that only when the Service Authorization Reference establishes it and document why.
-
-The runtime must remain deterministic. Do not introduce LLM calls, external inference APIs, or heuristics that guess authorization requirements. Authoritative research happens while developing mappings, not during each runtime check.
-
-### 5. Preserve simulation and fail-closed decisions
-
-Continue using AWS `iam:SimulatePrincipalPolicy` against the configured deployment role for AWS action/resource pairs that need verification. Do not substitute the checker role as the policy source, assume the deployer role, inject additional allow policies, or execute mutating AWS operations to test access.
-
-Preserve these outcomes:
-
-- Supported resource/data source and all required actions allowed: verified.
-- Explicitly supported item requiring no AWS authorization: verified with no AWS actions, with that classification shown in reporting.
-- Required action denied: FAIL, clearly identifying the action and resource.
-- Unsupported resource/data source: FAIL.
-- Inability to determine required permissions confidently: FAIL.
-- Missing context, missing/incomplete simulation results, simulation/API errors, or an existing safety restriction: FAIL with the reason clearly reported.
-
-PASS only when all relevant items and required permissions can be verified. Preserve pagination, permission-boundary/Organizations handling, and protections against unsupported resource policies. Never weaken an existing mapping, skip reads/dependencies, suppress an error, or treat unknown input as authorized merely to make a failing PR pass.
-
-### 6. Test each new mapping
-
-Add or update automated tests for every newly supported type. Cover each supported operation and the relevant configuration-dependent branches, not just one successful example. Include:
-
-- Exact IAM action names, resource scopes, and dependent permissions.
-- Create/update/delete/read separation, no-op refreshes, and replacements where applicable.
-- Explicit zero-AWS-permission cases such as local `archive_file`, including provider validation/extraction and absence of IAM simulation calls for those items.
-- Denied actions, unsupported variants, unknown values, missing dependencies/context, and incomplete results remaining failures.
-- Compatibility with existing mappings and summary output, including visibility of items requiring no AWS permissions.
-
-Use synthetic sanitized plans and mocked AWS responses for local tests. Never use apply or live mutation calls as a test. After implementation, run the relevant tests locally and run the existing suite when shared extraction, simulation, or reporting changes could affect it. The current repository command is `npm test`. Report actual results and any checks that could not run; do not claim live AWS verification from mocked tests.
-
-### 7. Report before committing or pushing
-
-Before any commit or push, provide a concrete implementation report containing:
-
-- Terraform resource/data-source types and providers added to support.
-- AWS IAM actions mapped for each operation, including read/refresh and resource scopes.
-- Items explicitly classified as requiring no AWS IAM permissions.
-- Indirect/dependent permissions, including relevant role/KMS/tagging conditions.
-- Remaining unsupported variants, uncertainty, provider-version assumptions, and simulator limitations.
-- Local test commands and results, including skipped/unavailable checks.
-- Files changed and whether the original failed plan was available for inspection.
-
-Do not commit or push unless explicitly requested. Existing explicit authorization in the session remains valid; do not request it again unnecessarily, but still deliver this report before the authorized commit/push. Otherwise leave the changes local for review. Do not merge or deploy without separate authorization.
-
-## Non-negotiable safety boundaries
-
-- Never create, modify, attach, detach, or delete AWS IAM roles or policies as part of extending the checker, including through Terraform configuration. Identify missing permissions; never grant them.
-- Never change the GitHub deployer/checker roles or their trust policies to work around a failure.
-- Never run `terraform apply` during this procedure, including for testing, debugging, or dependency discovery.
-- Never make AWS resource mutations as part of determining permissions. Preserve the checker's read-only execution boundary and backend/state configuration.
-- Never introduce secrets into source, fixtures, logs, prompts, or summaries.
-- Never weaken fail-closed behavior or existing checker safety to make a PR pass.
+Keep the report concise. Do not commit or push unless explicitly requested for the work. Do not merge or deploy without separate authorization. Complete the small extension, then handle later unsupported types in a later iteration.
