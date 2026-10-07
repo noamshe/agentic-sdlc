@@ -393,7 +393,14 @@ export async function simulate(requirements, call = aws) {
       : evaluation?.PermissionsBoundaryDecisionDetail?.AllowedByPermissionsBoundary === false ? 'permissions boundary deny'
       : evaluation?.OrganizationsDecisionDetail?.AllowedByOrganizations === false ? 'Organizations deny'
       : evaluation?.EvalDecision ?? 'missing result';
-    results.push({ ...requirement, allowed, decision });
+    const denied = evaluation?.PermissionsBoundaryDecisionDetail?.AllowedByPermissionsBoundary === false ||
+      evaluation?.OrganizationsDecisionDetail?.AllowedByOrganizations === false ||
+      [evaluation?.EvalDecision, ...(evaluation?.ResourceSpecificResults ?? []).map(item => item.EvalResourceDecision)]
+        .some(value => value === 'implicitDeny' || value === 'explicitDeny');
+    results.push({ ...requirement, allowed, decision,
+      outcome: allowed ? 'allowed' : contextMissing.length ||
+        (evaluation?.ResourceSpecificResults ?? []).some(item => item.MissingContextValues?.length)
+        ? 'unverified' : denied ? 'denied' : 'unverified' });
   }
   return results;
 }
@@ -426,8 +433,70 @@ export function report(results, issues, noAwsPermissions = []) {
     ...issues.map(issue => `- Cannot verify: ${safe(issue)}`), '',
     missing.length || issues.length ? '**FAIL: missing permissions or incomplete verification.**'
       : '**PASS: all mapped action/resource pairs are allowed by IAM simulation.**', '',
-    'Resource policies on roles, RCPs, endpoint policies, deployment-session restrictions, and future policy changes may differ from simulation.', ''
+    'Resource policies on roles, RCPs, endpoint policies, deployment-session restrictions, and future policy changes may differ from simulation.', '',
+    ...failureSummary(results, issues)
   ].join('\n');
+}
+
+function failedPairs(results) {
+  const pairs = new Map();
+  for (const item of results.filter(item => !item.allowed)) {
+    const key = JSON.stringify([item.action, item.resource]);
+    if (!pairs.has(key)) pairs.set(key, []);
+    pairs.get(key).push(item);
+  }
+  return [...pairs.values()];
+}
+const isDenied = item => item.outcome === 'denied' || (!item.outcome &&
+  ['implicitDeny', 'explicitDeny', 'permissions boundary deny', 'Organizations deny'].includes(item.decision));
+const annotationText = text => String(text).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+
+export function failureAnnotations(results, issues) {
+  return [ ...failedPairs(results).map(items => {
+    const item = items[0];
+    const status = items.some(isDenied) ? 'Denied' : 'Unverified';
+    return `::error::${annotationText(`${status} deployer permission: ${item.action} on ${item.resource}`)}`;
+  }), ...new Set(issues.map(issue => `::error::${annotationText(`Cannot verify deployer permissions: ${issue}`)}`)) ];
+}
+
+export function failureSummary(results, issues) {
+  const pairs = failedPairs(results);
+  if (!pairs.length && !issues.length) return [];
+  const denied = pairs.filter(items => items.some(isDenied));
+  const unverified = pairs.filter(items => items.some(item => !isDenied(item)));
+  const lines = ['### Final failure summary', '', 'Denied IAM actions and resource scopes:',
+    ...(denied.length ? denied.map(([item]) => `- ${safe(item.action)} → ${safe(item.resource)}`) : ['- none']), '',
+    'Unresolved / unverified (not confirmed missing permissions):',
+    ...unverified.map(([item]) => `- ${safe(item.action)} → ${safe(item.resource)} (${safe(item.decision)})`),
+    ...[...new Set(issues)].map(issue => `- ${safe(issue)}`),
+    ...(!unverified.length && !issues.length ? ['- none'] : []), '', '**Suggested IAM policy**', '',
+    `For ${ROLE}; confirmed denials only. Review before adding; nothing is applied automatically.`,
+    'An Allow statement cannot override an explicit deny, permissions boundary, or Organizations restriction.', ''];
+  const statements = new Map();
+  for (const items of denied) {
+    const item = items.find(isDenied);
+    // Retain mapped dependent-action conditions; never invent scope for unknowns.
+    const variants = [...new Map(items.filter(isDenied).map(result =>
+      [JSON.stringify(result.context ?? []), result.context ?? []])).values()];
+    if (variants.length > 1 && (variants.some(context => context.length !== 1) ||
+        new Set(variants.map(context => context[0].ContextKeyName)).size !== 1)) {
+      lines.push(`No policy suggested for ${safe(item.action)} on ${safe(item.resource)}: differing condition contexts require manual review.`);
+      continue;
+    }
+    const context = variants.length === 1 ? variants[0] : [{ ...variants[0][0],
+      ContextKeyValues: [...new Set(variants.flatMap(context => context[0].ContextKeyValues))] }];
+    if (variants.flat().some(entry => entry.ContextKeyType !== 'string')) {
+      lines.push(`No policy suggested for ${safe(item.action)} on ${safe(item.resource)}: unsupported condition context.`);
+      continue;
+    }
+    const statement = { Effect: 'Allow', Action: [item.action], Resource: [item.resource],
+      ...(context.length ? { Condition: { StringEquals: Object.fromEntries(context.map(entry =>
+        [entry.ContextKeyName, entry.ContextKeyValues])) } } : {}) };
+    statements.set(JSON.stringify(statement), statement);
+  }
+  if (statements.size) lines.push('```json', JSON.stringify({ Version: '2012-10-17', Statement: [...statements.values()] }, null, 2), '```');
+  else lines.push('No policy suggested: no confirmed denied permissions with supported scope/conditions. Resolve verification failures first.');
+  return [...lines, ''];
 }
 
 export async function main() {
@@ -464,6 +533,7 @@ export async function main() {
     issues.push(error.message);
   }
   const summary = report(results, issues, noAwsPermissions);
+  for (const annotation of failureAnnotations(results, issues)) console.error(annotation);
   console.log(summary);
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);
   if (issues.length || results.some(item => !item.allowed)) process.exitCode = 1;
