@@ -544,3 +544,100 @@ test('new mappings identify denied management and Lambda authorization actions i
   assert.match(report(results, mapping.issues), /FAIL/);
   assert.match(report(results.map(r => ({ ...r, allowed: true })), mapping.issues), /PASS/);
 });
+
+function generatedApiPlan() {
+  const resources = Object.keys(apiPaths).map(type => {
+    const values = { ...apiValues[type], ...(type === 'aws_apigatewayv2_api' ? { id: null }
+      : { api_id: null, ...(type === 'aws_apigatewayv2_stage' ? {} : { id: null }) }) };
+    const item = resource(type, ['create'], null, values);
+    item.change.after_unknown = type === 'aws_apigatewayv2_api' ? { id: true }
+      : { api_id: true, ...(type === 'aws_apigatewayv2_stage' ? {} : { id: true }) };
+    return item;
+  });
+  const input = extendedPlan(resources);
+  for (const config of input.configuration.root_module.resources.filter(item => item.type !== 'aws_apigatewayv2_api'))
+    config.expressions.api_id = { references: ['aws_apigatewayv2_api.example.id', 'aws_apigatewayv2_api.example'] };
+  const sources = [resources.filter(item => item.type !== 'aws_apigatewayv2_api').map(item =>
+    `resource "${item.type}" "example" {\n api_id = aws_apigatewayv2_api.example.id\n}`).join('\n')];
+  return { input, sources };
+}
+
+test('same-plan API creation checks collection writes and generated-ID read scopes without PATCH/DELETE', async () => {
+  const { input, sources } = generatedApiPlan();
+  const mapping = requiredPermissions(input, backend, { sources });
+  assert.deepEqual(mapping.issues, []);
+  const permissions = mapping.requirements.filter(item => item.action.startsWith('apigateway:'));
+  assert.deepEqual(permissions.map(item => [item.action, item.resource]).sort(), [
+    ['apigateway:POST', gatewayBase],
+    ['apigateway:GET', gatewayBase + '/*'],
+    ['apigateway:POST', gatewayBase + '/*/integrations'],
+    ['apigateway:GET', gatewayBase + '/*/integrations/*'],
+    ['apigateway:POST', gatewayBase + '/*/routes'],
+    ['apigateway:GET', gatewayBase + '/*/routes/*'],
+    ['apigateway:POST', gatewayBase + '/*/stages'],
+    ['apigateway:GET', gatewayBase + '/*/stages/$default']
+  ].sort());
+  const results = await simulate(mapping.requirements, async (_service, _operation, request) => {
+    assert.equal(request.PolicySourceArn, 'arn:aws:iam::240742387601:role/github-terraform-deployer');
+    assert.ok(!request.PolicyInputList);
+    return { EvaluationResults: [{ EvalActionName: request.ActionNames[0], EvalResourceName: request.ResourceArns[0], EvalDecision: 'allowed' }] };
+  });
+  assert.match(report(results, mapping.issues), /PASS/);
+  for (const required of permissions) {
+    const failed = results.map(item => item.action === required.action && item.resource === required.resource
+      ? { ...item, allowed: false, outcome: 'denied', decision: 'implicitDeny' } : item);
+    assert.match(report(failed, []), /FAIL/);
+  }
+  const rootOnly = await simulate(permissions, async (_s, _o, request) => ({ EvaluationResults: [{
+    EvalActionName: request.ActionNames[0], EvalResourceName: request.ResourceArns[0],
+    EvalDecision: request.ActionNames[0] === 'apigateway:POST' && request.ResourceArns[0] === gatewayBase ? 'allowed' : 'implicitDeny'
+  }] }));
+  assert.match(report(rootOnly, []), /FAIL/); // Creating the API alone does not authorize its children or reads.
+});
+
+test('new child IDs under existing APIs use known API scope; replacements never reuse old IDs', () => {
+  for (const type of ['aws_apigatewayv2_integration', 'aws_apigatewayv2_route']) {
+    const input = extendedPlan([resource(type, ['create'], null, { ...apiValues[type], id: null })]);
+    input.resource_changes[0].change.after_unknown = { id: true };
+    const mapping = requiredPermissions(input, backend);
+    assert.deepEqual(mapping.issues, []);
+    assert.ok(mapping.requirements.some(item => item.action === 'apigateway:GET' &&
+      item.resource === `${gatewayBase}/api123/${type.split('_').at(-1)}s/*`));
+  }
+  const { input, sources } = generatedApiPlan();
+  for (const item of input.resource_changes) {
+    item.change.actions = ['delete', 'create'];
+    item.change.before = apiValues[item.type];
+  }
+  const mapping = requiredPermissions(input, backend, { sources });
+  assert.deepEqual(mapping.issues, []);
+  assert.ok(mapping.requirements.some(item => item.action === 'apigateway:DELETE' && item.resource === `${gatewayBase}/api123`));
+  assert.ok(mapping.requirements.filter(item => item.action === 'apigateway:DELETE').every(item => !item.resource.includes('*')));
+  assert.ok(mapping.requirements.filter(item => item.action === 'apigateway:POST' && item.resource !== gatewayBase)
+    .every(item => item.resource.startsWith(`${gatewayBase}/*/`)));
+});
+
+test('unproven API dependencies, non-create unknowns and unsupported variants still fail closed', () => {
+  for (const mutate of [
+    fixture => { fixture.sources = []; },
+    fixture => { fixture.input.resource_changes[0].change.after_unknown.id = false; },
+    fixture => { fixture.input.resource_changes[0].change.actions = ['no-op']; },
+    fixture => { fixture.input.resource_changes[0].provider_name = 'other/provider'; },
+    fixture => { fixture.input.resource_changes[1].change.after_unknown.api_id = false; },
+    fixture => { fixture.input.resource_changes[1].change.actions = ['update']; },
+    fixture => { fixture.input.resource_changes[1].change.actions = ['no-op']; },
+    fixture => { fixture.input.configuration.root_module.resources[1].expressions.api_id.references.push('var.other'); },
+    fixture => { fixture.input.configuration.root_module.resources[1].expressions.api_id.references = ['aws_apigatewayv2_api.other.id']; },
+    fixture => { fixture.sources[0] = fixture.sources[0].replaceAll('api_id = aws_apigatewayv2_api.example.id', 'api_id = format("%s", aws_apigatewayv2_api.example.id)'); },
+    fixture => { fixture.sources[0] = '# ' + fixture.sources[0].replaceAll('\n', '\n# '); },
+    fixture => { fixture.input.resource_changes[0].change.after.protocol_type = 'WEBSOCKET'; },
+    fixture => { fixture.input.resource_changes[1].change.after.credentials_arn = executionRole; },
+    fixture => { fixture.input.resource_changes[3].change.after.name = null; }
+  ]) {
+    const fixture = generatedApiPlan();
+    mutate(fixture);
+    const mapping = requiredPermissions(fixture.input, backend, { sources: fixture.sources });
+    assert.ok(mapping.issues.length);
+    assert.match(report([], mapping.issues), /FAIL/);
+  }
+});
