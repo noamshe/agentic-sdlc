@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { changedLines, validateFindings, buildReview, redact, httpError, formatError, main } from '../dist/index.js';
+import { changedLines, inlineLocations, validateFindings, buildReview, redact, httpError, formatError, main } from '../dist/index.js';
 
 const lines = changedLines([{ filename: 'app.ts', patch: '@@ -10,2 +10,2 @@\n-old\n+new\n context', additions: 1, deletions: 1 }]);
 const finding = { severity: 'HIGH', title: 'Failure', body: 'Concrete consequence and fix.', path: 'app.ts', line: 10, side: 'RIGHT' };
@@ -13,6 +13,30 @@ test('only actual additions and deletions can receive inline comments', () => {
   assert.equal(validateFindings({ findings: [{ ...finding, side: 'LEFT' }] }, lines).length, 1);
   for (const change of [{ line: 11 }, { path: 'other.ts' }, { side: 'wrong' }, { line: '10' }])
     assert.throws(() => validateFindings({ findings: [{ ...finding, ...change }] }, lines));
+});
+
+test('explicit inline locations use old/new file numbers across shifted hunks and omit context lines', () => {
+  const changed = changedLines([{ filename: 'infra/api.tf', additions: 3, deletions: 3,
+    patch: '@@ -10,4 +20,4 @@\n context\n-old1\n-old2\n+new1\n+new2\n end\n@@ -40 +60 @@\n-old3\n+new3' }]);
+  const locations = inlineLocations(changed, []);
+  assert.deepEqual(locations, [
+    { path: 'infra/api.tf', line: 11, side: 'LEFT' }, { path: 'infra/api.tf', line: 12, side: 'LEFT' },
+    { path: 'infra/api.tf', line: 21, side: 'RIGHT' }, { path: 'infra/api.tf', line: 22, side: 'RIGHT' },
+    { path: 'infra/api.tf', line: 40, side: 'LEFT' }, { path: 'infra/api.tf', line: 60, side: 'RIGHT' }
+  ]);
+  for (const location of locations) assert.equal(validateFindings({ findings: [{ ...finding, ...location }] }, changed).length, 1);
+  for (const location of [{ path: 'infra/api.tf', line: 20, side: 'RIGHT' }, { path: 'infra/api.tf', line: 21, side: 'LEFT' }])
+    assert.throws(() => validateFindings({ findings: [{ ...finding, ...location }] }, changed), /inline location does not match/);
+});
+
+test('inline location input omits secret-bearing paths and summary findings retain blocking severity', () => {
+  const changed = new Set([JSON.stringify(['private-value/app.ts', 1, 'RIGHT']), JSON.stringify(['sk-example-secret.ts', 1, 'RIGHT'])]);
+  assert.deepEqual(inlineLocations(changed, ['private-value']), []);
+  const findings = validateFindings({ findings: [{ ...finding, path: null, line: null, side: null }] }, changed);
+  const review = buildReview(findings);
+  assert.equal(review.event, 'REQUEST_CHANGES');
+  assert.equal(review.comments.length, 0);
+  assert.match(review.body, /Concrete consequence and fix/);
 });
 test('untrusted schema, severity, duplicate and oversized output are rejected', () => {
   for (const value of [null, { findings: [], event: 'APPROVE' }, { findings: [{ ...finding, severity: 'CRITICAL' }] },
@@ -136,9 +160,18 @@ test('invalid model findings fail closed before publishing any GitHub review', a
     GITHUB_EVENT_NAME: 'pull_request', GITHUB_REPOSITORY: 'owner/repo' };
   const previous = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
   let githubWrites = 0;
+  let modelFinding = { ...finding, severity: 'private prompt content' };
   t.mock.method(globalThis, 'fetch', async (url, options) => {
-    if (String(url).startsWith('https://api.openai.com/')) return Response.json({ status: 'completed',
-      output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify({ findings: [{ ...finding, severity: 'private prompt content' }] }) }] }] });
+    if (String(url).startsWith('https://api.openai.com/')) {
+      const request = JSON.parse(options.body);
+      const input = JSON.parse(request.input[0].content);
+      assert.deepEqual(input.validInlineLocations, [{ path: 'app.ts', line: 10, side: 'LEFT' }, { path: 'app.ts', line: 10, side: 'RIGHT' }]);
+      assert.match(request.instructions, /validInlineLocations/);
+      assert.ok(!options.body.includes(env.GITHUB_TOKEN));
+      assert.ok(!options.body.includes(env.OPENAI_API_KEY));
+      return Response.json({ status: 'completed',
+        output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify({ findings: [modelFinding] }) }] }] });
+    }
     if (options.method !== 'GET') { githubWrites++; throw new Error('Unexpected GitHub write'); }
     if (String(url).includes('/files?')) return Response.json([{ filename: 'app.ts',
       patch: '@@ -10,2 +10,2 @@\n-old\n+new\n context', additions: 1, deletions: 1 }]);
@@ -154,6 +187,8 @@ test('invalid model findings fail closed before publishing any GitHub review', a
       for (const text of [env.GITHUB_TOKEN, env.OPENAI_API_KEY, pr.title, pr.body]) assert.ok(!diagnostic.includes(text));
       return true;
     });
+    modelFinding = { ...finding, line: 11 };
+    await assert.rejects(main(), /inline location does not match a changed line in the PR diff/);
     assert.equal(githubWrites, 0);
   } finally {
     for (const [key, value] of Object.entries(previous)) {
