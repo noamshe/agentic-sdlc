@@ -7,8 +7,12 @@
 `login/routes.mjs`, which calls `login/handlers/login.mjs` to serve the packaged
 `login/page.html`. Username and password fields are labelled and optional. Sign in navigates to
 `GET /back-office` without submitting or storing anything. The demo back office
-shows sample statistics and three packaged SVG illustrations; Log out returns
-to `/login`. Both pages are public demo pages with no authentication or session.
+shows sample statistics and three packaged SVG illustrations. How it works opens
+`GET /agentic-flow`, a five-stage visual guide covering Codex, PRs, automated
+checks, human merge, and Terraform deployment. The guide has Back office and
+Log out links and uses the same router, handlers, and packaged HTML structure.
+Each page has an explicit GET route and route-scoped invocation permission.
+Log out returns to `/login`. All three pages are public demo pages with no authentication or session.
 The back office follows the same `index.mjs -> routes.mjs -> handlers/` structure
 and is packaged in the existing login Lambda, with its own explicit API Gateway
 GET route and route-scoped invocation permission.
@@ -60,5 +64,6 @@ Application entry points are `hello/index.mjs` and
 Terraform packages each application directory into an ignored ZIP under
 `build/lambdas/`. Each function uses `index.handler` and the archive's
 `output_base64sha256` as `source_code_hash`, so changed code triggers an update.
-Both Terraform workflows watch `src/lambdas/**` as well as `infra/**`.
+The deployment workflow watches `src/lambdas/**` as well as `infra/**`;
+the permission checker runs only for `infra/**` changes.
 No AWS resources are deployed by local tests or validation.

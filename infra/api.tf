@@ -82,3 +82,19 @@ resource "aws_lambda_permission" "back_office_api" {
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.lab.execution_arn}/${aws_apigatewayv2_stage.lab.name}/GET/back-office"
 }
+
+# Workflow guide is packaged alongside the other demo pages.
+resource "aws_apigatewayv2_route" "agentic_flow" {
+  api_id             = aws_apigatewayv2_api.lab.id
+  route_key          = "GET /agentic-flow"
+  authorization_type = "NONE"
+  target             = "integrations/${aws_apigatewayv2_integration.login_lambda.id}"
+}
+
+resource "aws_lambda_permission" "agentic_flow_api" {
+  statement_id  = "AllowAgenticFlowHttpApi"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.login.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.lab.execution_arn}/${aws_apigatewayv2_stage.lab.name}/GET/agentic-flow"
+}
