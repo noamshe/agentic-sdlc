@@ -167,6 +167,25 @@ function generatedApi(resource, configuration, resources, bindings) {
     matches.length === 1 && creatingAPI(matches[0]);
 }
 
+function providerStageDefaults(resource, values, configuration) {
+  // Provider v6.67.0 stage.go flattens AWS defaults on refresh even when HCL
+  // omits the block. These known, disabled logging/metrics defaults need no
+  // extra IAM actions. Explicit configuration remains outside this subset.
+  // https://github.com/hashicorp/terraform-provider-aws/blob/v6.67.0/internal/service/apigatewayv2/stage.go
+  if (resource.type !== 'aws_apigatewayv2_stage' ||
+      Object.hasOwn(configuration.get(resource.address)?.expressions ?? {}, 'default_route_settings')) return false;
+  const settings = values.default_route_settings;
+  const fields = ['data_trace_enabled', 'detailed_metrics_enabled', 'logging_level',
+    'throttling_burst_limit', 'throttling_rate_limit'];
+  return Array.isArray(settings) && settings.length === 1 && settings.every(item =>
+    item && typeof item === 'object' && !Array.isArray(item) &&
+    Object.keys(item).every(key => fields.includes(key)) &&
+    [item.data_trace_enabled, item.detailed_metrics_enabled].every(value => value == null || value === false) &&
+    [undefined, null, '', 'OFF'].includes(item.logging_level) &&
+    [item.throttling_burst_limit, item.throttling_rate_limit].every(value =>
+      value == null || typeof value === 'number' && Number.isFinite(value) && value >= 0));
+}
+
 function mapExtended(resource, configuration, resources, bindings, add, issues, inspections) {
   const change = resource.change;
   const creating = change.actions.includes('create'), updating = change.actions.includes('update');
@@ -196,9 +215,12 @@ function mapExtended(resource, configuration, resources, bindings, add, issues, 
       // Support the untagged HTTP API/Lambda proxy subset in infra/api.tf.
       if (Object.keys(values.tags_all ?? values.tags ?? {}).length || values.credentials_arn || values.body ||
           values.target && resource.type === 'aws_apigatewayv2_api' || values.cors_configuration?.length ||
-          values.access_log_settings?.length || values.route_settings?.length || values.default_route_settings?.length ||
+          values.access_log_settings?.length || values.route_settings?.length ||
+          values.default_route_settings?.length && !providerStageDefaults(resource, values, configuration) ||
           values.client_certificate_id || values.stage_variables && Object.keys(values.stage_variables).length)
         issue('Advanced API Gateway configuration or tagging is not mapped');
+      if (resource.type === 'aws_apigatewayv2_stage' && phase === 'after' && unknown(change.after_unknown?.default_route_settings))
+        issue('Unknown API Gateway stage default route settings are not mapped');
       if (resource.type === 'aws_apigatewayv2_api' && values.protocol_type !== 'HTTP') issue('Only HTTP APIs are mapped');
       if (resource.type === 'aws_apigatewayv2_integration' && (values.integration_type !== 'AWS_PROXY' ||
           values.connection_type && values.connection_type !== 'INTERNET' || values.integration_subtype || values.connection_id ||
@@ -237,7 +259,7 @@ function mapExtended(resource, configuration, resources, bindings, add, issues, 
         : resource.type === 'aws_apigatewayv2_integration'
           ? ['integration_uri', 'integration_method', 'payload_format_version', 'description', 'timeout_milliseconds']
           : resource.type === 'aws_apigatewayv2_route' ? ['route_key', 'authorization_type', 'target']
-          : ['auto_deploy', 'description'];
+          : ['auto_deploy', 'description', 'default_route_settings'];
       if (update && updateFields.some(field => changed(change, field))) action('apigateway:PATCH', arn);
       if (remove) action('apigateway:DELETE', arn);
     } else if (resource.type === 'aws_lambda_permission') {
