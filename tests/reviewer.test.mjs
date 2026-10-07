@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { changedLines, validateFindings, buildReview, redact, httpError, formatError } from '../dist/index.js';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { changedLines, validateFindings, buildReview, redact, httpError, formatError, main } from '../dist/index.js';
 
 const lines = changedLines([{ filename: 'app.ts', patch: '@@ -10,2 +10,2 @@\n-old\n+new\n context', additions: 1, deletions: 1 }]);
 const finding = { severity: 'HIGH', title: 'Failure', body: 'Concrete consequence and fix.', path: 'app.ts', line: 10, side: 'RIGHT' };
@@ -69,4 +72,93 @@ test('error messages, codes and causes are sanitized before logging', () => {
   assert.ok(!diagnostic.includes('\n'));
   assert.ok(!formatError(new Error('Authorization: Bearer unexpectedcredential'), []).includes('unexpectedcredential'));
   assert.match(formatError(new Error('Invalid review findings'), []), /Invalid review findings/);
+});
+
+test('validation diagnostics identify schema fields, item indexes and violated rules', () => {
+  const without = field => Object.fromEntries(Object.entries(finding).filter(([key]) => key !== field));
+  for (const [value, expected] of [
+    [null, 'response: expected an object'],
+    [{}, 'response: missing required field findings'],
+    [{ findings: [], extra: true }, 'response: unexpected fields'],
+    [{ findings: {} }, 'findings: expected an array'],
+    [{ findings: Array(21).fill(finding) }, 'findings: exceeds maximum of 20 items'],
+    [{ findings: [null] }, 'findings[0]: expected an object'],
+    [{ findings: [without('body')] }, 'findings[0]: missing required fields: body'],
+    [{ findings: [{ ...finding, extra: true }] }, 'findings[0]: unexpected fields'],
+    [{ findings: [{ ...finding, severity: 'INVALID' }] }, 'findings[0].severity: expected BLOCKER, HIGH, MEDIUM or LOW'],
+    [{ findings: [{ ...finding, title: 123 }] }, 'findings[0].title: expected a string'],
+    [{ findings: [{ ...finding, body: '   ' }] }, 'findings[0].body: must not be blank'],
+    [{ findings: [{ ...finding, title: 'x'.repeat(201) }] }, 'findings[0].title: exceeds maximum of 200 characters'],
+    [{ findings: [{ ...finding, body: '\u0001' }] }, 'findings[0].body: contains forbidden control characters'],
+    [{ findings: [{ ...finding, path: null }] }, 'findings[0]: path, line and side must all be null or form a complete inline location'],
+    [{ findings: [{ ...finding, path: 123 }] }, 'findings[0].path: expected a string for an inline location'],
+    [{ findings: [{ ...finding, line: '10' }] }, 'findings[0].line: expected a positive safe integer'],
+    [{ findings: [{ ...finding, side: 'WRONG' }] }, 'findings[0].side: expected LEFT or RIGHT'],
+    [{ findings: [{ ...finding, line: 11 }] }, 'findings[0]: inline location does not match a changed line in the PR diff'],
+    [{ findings: [finding, finding] }, 'findings[1]: duplicate finding']
+  ]) {
+    assert.throws(() => validateFindings(value, lines), error => {
+      assert.equal(formatError(error, []), `Invalid review findings: ${expected}`);
+      return true;
+    });
+  }
+});
+
+test('validation diagnostics never echo untrusted values, field names or sensitive content', () => {
+  const sensitive = 'private prompt content with sk-example-secret and ghp_exampletoken';
+  for (const value of [
+    { findings: [], [sensitive]: sensitive },
+    { findings: [{ ...finding, [sensitive]: sensitive }] },
+    { findings: [{ ...finding, severity: sensitive }] },
+    { findings: [{ ...finding, title: sensitive + '\u0001' }] },
+    { findings: [{ ...finding, body: sensitive.repeat(100) }] },
+    { findings: [{ ...finding, path: sensitive }] },
+    { findings: [{ ...finding, line: sensitive }] },
+    { findings: [{ ...finding, side: sensitive }] }
+  ]) {
+    assert.throws(() => validateFindings(value, lines), error => {
+      const diagnostic = formatError(error, []); // Safe even without known-secret redaction.
+      for (const text of [sensitive, 'private prompt content', 'sk-example-secret', 'ghp_exampletoken'])
+        assert.ok(!diagnostic.includes(text));
+      assert.ok(!Object.hasOwn(error, 'cause'));
+      assert.match(diagnostic, /^Invalid review findings:/);
+      return true;
+    });
+  }
+});
+
+test('invalid model findings fail closed before publishing any GitHub review', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'review-validation-'));
+  const eventPath = join(directory, 'event.json');
+  const pr = { number: 1, state: 'open', draft: false, changed_files: 1, title: 'private PR title', body: 'private prompt content',
+    head: { sha: 'head-sha', ref: 'feature', repo: { full_name: 'owner/repo' } }, base: { sha: 'base-sha', ref: 'main' } };
+  const env = { GITHUB_TOKEN: 'ghp_testgithubsecret', OPENAI_API_KEY: 'sk-testopenaisecret', GITHUB_EVENT_PATH: eventPath,
+    GITHUB_EVENT_NAME: 'pull_request', GITHUB_REPOSITORY: 'owner/repo' };
+  const previous = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+  let githubWrites = 0;
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (String(url).startsWith('https://api.openai.com/')) return Response.json({ status: 'completed',
+      output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify({ findings: [{ ...finding, severity: 'private prompt content' }] }) }] }] });
+    if (options.method !== 'GET') { githubWrites++; throw new Error('Unexpected GitHub write'); }
+    if (String(url).includes('/files?')) return Response.json([{ filename: 'app.ts',
+      patch: '@@ -10,2 +10,2 @@\n-old\n+new\n context', additions: 1, deletions: 1 }]);
+    if (options.headers.Accept.includes('diff')) return new Response('PR diff');
+    return Response.json(pr);
+  });
+  try {
+    await writeFile(eventPath, JSON.stringify({ pull_request: pr }));
+    Object.assign(process.env, env);
+    await assert.rejects(main(), error => {
+      const diagnostic = formatError(error);
+      assert.match(diagnostic, /findings\[0\]\.severity: expected BLOCKER, HIGH, MEDIUM or LOW/);
+      for (const text of [env.GITHUB_TOKEN, env.OPENAI_API_KEY, pr.title, pr.body]) assert.ok(!diagnostic.includes(text));
+      return true;
+    });
+    assert.equal(githubWrites, 0);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
 });
