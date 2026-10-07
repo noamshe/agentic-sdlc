@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { changedLines, inlineLocations, validateFindings, buildReview, redact, httpError, formatError, main } from '../dist/index.js';
+import { changedLines, inlineLocations, validateFindings, buildReview, redact, httpError, formatError, reviewSubmissionDiagnostics, main } from '../dist/index.js';
 
 const lines = changedLines([{ filename: 'app.ts', patch: '@@ -10,2 +10,2 @@\n-old\n+new\n context', additions: 1, deletions: 1 }]);
 const finding = { severity: 'HIGH', title: 'Failure', body: 'Concrete consequence and fix.', path: 'app.ts', line: 10, side: 'RIGHT' };
@@ -129,6 +129,50 @@ test('error messages, codes and causes are sanitized before logging', () => {
   assert.match(formatError(new Error('Invalid review findings'), []), /Invalid review findings/);
 });
 
+test('submission diagnostics identify each comment and only copy safe location fields', () => {
+  const payload = { event: 'REQUEST_CHANGES', body: 'private review body', commit_id: 'not logged', comments: [
+    { path: 'infra/api.tf', line: 28, side: 'RIGHT', body: 'private comment body' },
+    { path: 'old.ts', line: 15, side: 'LEFT', start_line: 12, start_side: 'LEFT', body: 'private model output' }
+  ] };
+  const original = JSON.stringify(payload);
+  assert.deepEqual(JSON.parse(reviewSubmissionDiagnostics(payload, [])), {
+    event: 'REQUEST_CHANGES', comment_count: 2, comments: [
+      { index: 0, path: 'infra/api.tf', line: 28, side: 'RIGHT', start_line: 'not submitted', start_side: 'not submitted' },
+      { index: 1, path: 'old.ts', line: 15, side: 'LEFT', start_line: 12, start_side: 'LEFT' }
+    ]
+  });
+  assert.equal(JSON.stringify(payload), original);
+  assert.deepEqual(JSON.parse(reviewSubmissionDiagnostics({ event: 'APPROVE', comments: [] }, [])),
+    { event: 'APPROVE', comment_count: 0, comments: [] });
+});
+
+test('submission diagnostics redact paths and withhold invalid metadata and echoed response content', async () => {
+  const secret = 'private/value"withquote';
+  const sensitive = 'private prompt and model output';
+  const payload = { event: sensitive, body: sensitive, comments: [
+    { path: `${secret}/${encodeURIComponent(secret)}/ghp_exampletoken/sk-example-secret\nfile.ts`,
+      line: sensitive, side: sensitive, start_line: -1, start_side: sensitive, body: sensitive }
+  ] };
+  const diagnostic = reviewSubmissionDiagnostics(payload, [secret]);
+  for (const value of [secret, encodeURIComponent(secret), 'ghp_exampletoken', 'sk-example-secret', sensitive])
+    assert.ok(!diagnostic.includes(value));
+  assert.ok(!diagnostic.includes('\n'));
+  const error = await httpError('GitHub review submission', Response.json({ message: sensitive, code: sensitive, type: sensitive,
+    errors: [{ field: 'comments[0].line', code: 'invalid', message: sensitive, value: sensitive },
+      { message: 'PullRequestReview threads is invalid' }] }, { status: 422 }), payload);
+  const logged = formatError(error, [secret]);
+  assert.match(logged, /field: comments\[0\]\.line, code: invalid/);
+  assert.match(logged, /inline review comments or threads are invalid/);
+  assert.match(logged, /zero-based comment indexes/);
+  assert.ok(!logged.includes(sensitive));
+  const bounded = JSON.parse(reviewSubmissionDiagnostics({ event: 'COMMENT', comments: Array.from({ length: 6 }, () =>
+    ({ path: 'x'.repeat(5000), line: 1, side: 'RIGHT' })) }, []));
+  assert.equal(bounded.comments.length, 5);
+  assert.equal(bounded.comment_count, 6);
+  assert.equal(bounded.comments[0].path.length, 200);
+  assert.equal(bounded.additional_comments, 'omitted');
+});
+
 test('validation diagnostics identify schema fields, item indexes and violated rules', () => {
   const without = field => Object.fromEntries(Object.entries(finding).filter(([key]) => key !== field));
   for (const [value, expected] of [
@@ -209,6 +253,7 @@ test('invalid findings and GitHub validation rejections fail closed without appr
       if (!rejectReview) throw new Error('Unexpected GitHub write');
       assert.ok(String(url).endsWith('/reviews'));
       const review = JSON.parse(options.body);
+      assert.deepEqual(review, { commit_id: pr.head.sha, ...buildReview([finding]) });
       assert.equal(review.commit_id, pr.head.sha);
       assert.equal(review.event, 'REQUEST_CHANGES');
       assert.equal(review.comments[0].line, 10);
@@ -237,7 +282,12 @@ test('invalid findings and GitHub validation rejections fail closed without appr
     modelFinding = finding;
     rejectReview = true;
     await assert.rejects(main(), error => {
-      assert.match(formatError(error), /GitHub review submission HTTP 422.*inline review comments or threads are invalid/);
+      const diagnostic = formatError(error);
+      assert.match(diagnostic, /GitHub review submission HTTP 422.*inline review comments or threads are invalid/);
+      assert.match(diagnostic, /"event":"REQUEST_CHANGES"/);
+      assert.match(diagnostic, /"index":0,"path":"app.ts","line":10,"side":"RIGHT","start_line":"not submitted","start_side":"not submitted"/);
+      for (const text of [finding.title, finding.body, pr.title, pr.body, env.GITHUB_TOKEN, env.OPENAI_API_KEY])
+        assert.ok(!diagnostic.includes(text));
       return true;
     });
     assert.equal(githubWrites, 1); // No retries, summary-only fallback, or clean approval.

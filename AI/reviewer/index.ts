@@ -157,7 +157,7 @@ function githubValidationDetails(errors: unknown): string[] {
   const rules: [RegExp, string][] = [
     [/^(?:Pull request review thread )?line must be part of the diff\.?$/i, 'inline line must be part of the diff'],
     [/^(?:Pull request review thread )?diff hunk (?:can't|cannot) be blank\.?$/i, 'inline diff hunk cannot be blank'],
-    [/^Review (?:comments|threads) (?:is|are) invalid\.?$/i, 'inline review comments or threads are invalid'],
+    [/^(?:Review|PullRequestReview) (?:comments|threads) (?:is|are) invalid\.?$/i, 'inline review comments or threads are invalid'],
     [/^(?:Pull request review thread )?path (?:can't|cannot) be blank\.?$/i, 'inline path cannot be blank'],
     [/^Body (?:can't|cannot) be blank\.?$/i, 'review body cannot be blank'],
     [/^(?:Can not|Cannot|You cannot) approve your own pull request\.?$/i, 'reviewer cannot approve its own PR'],
@@ -170,7 +170,9 @@ function githubValidationDetails(errors: unknown): string[] {
     const detail = item && typeof item === 'object' && !Array.isArray(item) ? item as Record<string, unknown> : {};
     const labels: string[] = [];
     for (const [key, allowed] of [['resource', resources], ['field', fields], ['code', codes]] as const)
-      if (typeof detail[key] === 'string') labels.push(`${key}: ${allowed.includes(detail[key]) ? detail[key] : 'unrecognized (withheld)'}`);
+      if (typeof detail[key] === 'string') labels.push(`${key}: ${allowed.includes(detail[key]) ||
+        (key === 'field' && /^(?:comments|review_comments|review_threads)\[\d{1,3}\]\.(?:path|line|side|start_line|start_side|body|position)$/.test(detail[key]))
+        ? detail[key] : 'unrecognized (withheld)'}`);
     const message = typeof item === 'string' ? item : detail.message;
     if (typeof message === 'string') labels.push(rules.find(([pattern]) => pattern.test(message))?.[1] ?? 'custom validation message withheld');
     return `errors[${index}]: ${labels.join(', ') || 'unrecognized validation detail (withheld)'}`;
@@ -178,7 +180,7 @@ function githubValidationDetails(errors: unknown): string[] {
 }
 
 // Read only diagnostic fields, never log complete responses, headers, or requests.
-export async function httpError(service: string, response: Response): Promise<Error> {
+export async function httpError(service: string, response: Response, submission?: unknown): Promise<Error> {
   const error = new Error(`${service} HTTP ${response.status} ${response.statusText}`);
   Object.assign(error, { status: response.status });
   try {
@@ -187,9 +189,11 @@ export async function httpError(service: string, response: Response): Promise<Er
       const root = body as Record<string, unknown>;
       const detail = root.error && typeof root.error === 'object'
         ? root.error as Record<string, unknown> : root;
-      if (typeof detail.message === 'string') error.message += `: ${detail.message}`;
+      if (typeof detail.message === 'string') error.message += `: ${service === 'GitHub review submission'
+        ? (['Unprocessable Entity', 'Validation Failed', 'Resource not accessible by integration', 'Not Found', 'Bad credentials'].includes(detail.message)
+          ? detail.message : 'response message withheld') : detail.message}`;
       for (const field of ['code', 'type'] as const)
-        if (typeof detail[field] === 'string' || typeof detail[field] === 'number')
+        if (service !== 'GitHub review submission' && (typeof detail[field] === 'string' || typeof detail[field] === 'number'))
           Object.assign(error, { [field]: detail[field] });
       if (service.startsWith('GitHub')) {
         const validation = githubValidationDetails(root.errors);
@@ -197,7 +201,32 @@ export async function httpError(service: string, response: Response): Promise<Er
       }
     }
   } catch { /* Preserve HTTP status when the response is not JSON. */ }
+  if (service === 'GitHub review submission' && submission !== undefined)
+    error.message += `; submitted review (zero-based comment indexes): ${reviewSubmissionDiagnostics(submission)}`;
   return error;
+}
+
+// Copy only location metadata, never retain or serialize the submitted bodies.
+// Missing fields are explicit; validation error indexes are not comment indexes.
+export function reviewSubmissionDiagnostics(submission: unknown, secrets = environmentSecrets()): string {
+  const root = submission && typeof submission === 'object' ? submission as Record<string, unknown> : {};
+  const safeField = (item: Record<string, unknown>, field: string): unknown => {
+    if (!Object.hasOwn(item, field)) return 'not submitted';
+    const value = item[field];
+    if (field === 'path') return typeof value === 'string'
+      ? formatError(new Error(value), secrets).slice(0, 200) : 'invalid (withheld)';
+    if (field === 'line' || field === 'start_line')
+      return Number.isSafeInteger(value) && (value as number) > 0 ? value : 'invalid (withheld)';
+    const allowed = field === 'event' ? ['APPROVE', 'REQUEST_CHANGES', 'COMMENT'] : ['LEFT', 'RIGHT'];
+    return typeof value === 'string' && allowed.includes(value) ? value : 'invalid (withheld)';
+  };
+  const comments = Array.isArray(root.comments) ? root.comments : [];
+  return JSON.stringify({ event: safeField(root, 'event'), comment_count: comments.length,
+    comments: comments.slice(0, 5).map((comment, index) => {
+      const item = comment && typeof comment === 'object' ? comment as Record<string, unknown> : {};
+      return { index, ...Object.fromEntries(['path', 'line', 'side', 'start_line', 'start_side']
+        .map(field => [field, safeField(item, field)])) };
+    }), ...(comments.length > 5 ? { additional_comments: 'omitted' } : {}) });
 }
 
 export function formatError(error: unknown, secrets = environmentSecrets()): string {
@@ -236,7 +265,10 @@ export async function main() {
     const response = await fetch(url, { method, redirect: 'error', signal: AbortSignal.timeout(30_000),
       headers: { Authorization: `Bearer ${token}`, Accept: accept, 'Content-Type': 'application/json',
         'X-GitHub-Api-Version': '2022-11-28' }, body: body ? JSON.stringify(body) : undefined });
-    if (!response.ok) throw await httpError(method === 'POST' && url === `${base}/reviews` ? 'GitHub review submission' : 'GitHub', response);
+    if (!response.ok) {
+      const submission = method === 'POST' && url === `${base}/reviews`;
+      throw await httpError(submission ? 'GitHub review submission' : 'GitHub', response, submission ? body : undefined);
+    }
     return accept.includes('diff') ? response.text() : response.json();
   }
   const pr = await github(base);
