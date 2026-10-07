@@ -335,3 +335,122 @@ test('unknown retention and unmapped role creation dependencies cannot be certif
   assert.ok(requiredPermissions(input, backend).issues.some(i => i.includes('Unknown retention')));
   assert.ok(mapped('aws_iam_role', ['create'], null, { ...valuesByType.aws_iam_role, permissions_boundary: 'policy' }).issues.length);
 });
+
+const gatewayBase = 'arn:aws:apigateway:eu-west-1::/apis';
+const apiValues = {
+  aws_apigatewayv2_api: { id: 'api123', name: 'lab-http', protocol_type: 'HTTP' },
+  aws_apigatewayv2_integration: { id: 'int123', api_id: 'api123', integration_type: 'AWS_PROXY',
+    integration_uri: 'arn:aws:apigateway:eu-west-1:lambda:path/2015-03-31/functions/arn:aws:lambda:eu-west-1:240742387601:function:lab/invocations',
+    integration_method: 'POST', payload_format_version: '2.0' },
+  aws_apigatewayv2_route: { id: 'route123', api_id: 'api123', route_key: 'GET /hello', authorization_type: 'NONE', target: 'integrations/int123' },
+  aws_apigatewayv2_stage: { id: '$default', api_id: 'api123', name: '$default', auto_deploy: true },
+  aws_lambda_permission: { function_name: 'lab', statement_id: 'AllowHelloHttpApi', action: 'lambda:InvokeFunction',
+    principal: 'apigateway.amazonaws.com', source_arn: 'arn:aws:execute-api:eu-west-1:240742387601:api123/$default/GET/hello' }
+};
+const apiPaths = { aws_apigatewayv2_api: '/api123', aws_apigatewayv2_integration: '/api123/integrations/int123',
+  aws_apigatewayv2_route: '/api123/routes/route123', aws_apigatewayv2_stage: '/api123/stages/$default' };
+
+for (const type of Object.keys(apiPaths)) {
+  test(`${type}: maps exact management verbs and paths for create/update/delete/refresh`, () => {
+    const before = apiValues[type];
+    const collection = apiPaths[type].substring(0, apiPaths[type].lastIndexOf('/'));
+    const update = type === 'aws_apigatewayv2_route' ? { route_key: 'GET /new' } : { description: 'changed' };
+    for (const [operation, old, after, verb] of [['create', null, before, 'POST'], ['update', before, { ...before, ...update }, 'PATCH'],
+      ['delete', before, null, 'DELETE'], ['no-op', before, before, null]]) {
+      const result = mapped(type, [operation], old, after);
+      assert.deepEqual(result.issues, []);
+      const permissions = result.requirements.filter(r => r.action.startsWith('apigateway:'));
+      assert.ok(permissions.some(r => r.action === 'apigateway:GET' && r.resource === gatewayBase + apiPaths[type]));
+      assert.deepEqual(permissions.filter(r => r.action !== 'apigateway:GET').map(r => [r.action, r.resource]),
+        verb ? [[`apigateway:${verb}`, operation === 'create' ? gatewayBase + collection : gatewayBase + apiPaths[type]]] : []);
+      if (type === 'aws_apigatewayv2_stage') assert.ok(permissions.some(r => r.action === 'apigateway:GET' && r.resource === gatewayBase + '/api123'));
+      assert.ok(permissions.every(r => !r.resource.includes('*')));
+    }
+  });
+}
+
+test('API Gateway replacements scope delete to old objects and create to new collections', () => {
+  for (const type of Object.keys(apiPaths)) {
+    const before = apiValues[type];
+    const after = { ...before, id: 'new123', ...(type === 'aws_apigatewayv2_api' ? {} : { api_id: 'newapi123' }),
+      ...(type === 'aws_apigatewayv2_stage' ? { name: 'newstage' } : {}) };
+    const result = mapped(type, ['delete', 'create'], before, after);
+    assert.deepEqual(result.issues, []);
+    assert.ok(result.requirements.some(r => r.action === 'apigateway:DELETE' && r.resource === gatewayBase + apiPaths[type]));
+    const post = result.requirements.find(r => r.action === 'apigateway:POST');
+    assert.equal(post.resource, type === 'aws_apigatewayv2_api' ? gatewayBase : `${gatewayBase}/newapi123/${type.split('_').at(-1)}s`);
+    assert.ok(!result.requirements.some(r => r.action === 'apigateway:DELETE' && r.resource.includes('new')));
+  }
+});
+
+test('Lambda permission maps policy reads, create/delete and replacement without deployer InvokeFunction', async () => {
+  const before = apiValues.aws_lambda_permission;
+  const arn = 'arn:aws:lambda:eu-west-1:240742387601:function:lab';
+  for (const [operation, old, after, action] of [['create', null, before, 'lambda:AddPermission'],
+    ['delete', before, null, 'lambda:RemovePermission'], ['no-op', before, before, null]]) {
+    const result = mapped('aws_lambda_permission', [operation], old, after);
+    assert.deepEqual(result.issues, []);
+    const perms = result.requirements.filter(r => r.action.startsWith('lambda:'));
+    assert.deepEqual(new Set(perms.map(r => r.action)), new Set(['lambda:GetPolicy', ...(action ? [action] : [])]));
+    assert.ok(perms.every(r => r.resource === arn));
+    const mutation = perms.find(r => r.action === action);
+    if (mutation) {
+      await simulate([mutation], async (_service, _operation, request) => {
+        assert.ok(request.ContextEntries.some(c => c.ContextKeyName === 'lambda:Principal' && c.ContextKeyValues[0] === before.principal));
+        return { EvaluationResults: [{ EvalActionName: mutation.action, EvalResourceName: arn, EvalDecision: 'allowed' }] };
+      });
+    }
+  }
+  const replacement = mapped('aws_lambda_permission', ['delete', 'create'], before, { ...before, function_name: 'new-function' });
+  assert.ok(replacement.requirements.some(r => r.action === 'lambda:RemovePermission' && r.resource === arn));
+  assert.ok(replacement.requirements.some(r => r.action === 'lambda:AddPermission' && r.resource.endsWith(':new-function')));
+  assert.ok(mapped('aws_lambda_permission', ['update'], before, { ...before, source_arn: 'changed' }).issues.length);
+  assert.deepEqual(mapped('aws_lambda_permission', ['create'], null, { ...before, function_name: arn }).issues, []);
+});
+
+test('unknown AWS-generated API/child IDs fail closed and never use wildcard or old replacement scopes', () => {
+  for (const type of Object.keys(apiPaths)) {
+    const before = apiValues[type];
+    const after = { ...before, ...(type === 'aws_apigatewayv2_api' ? { id: null } : { api_id: null }) };
+    const result = mapped(type, ['delete', 'create'], before, after);
+    assert.ok(result.issues.some(i => i.includes('Unverified API Gateway ID')));
+    assert.ok(!result.requirements.some(r => r.action === 'apigateway:POST' && r.resource !== gatewayBase));
+    assert.ok(result.requirements.every(r => !r.resource.includes('*')));
+    assert.match(report([], result.issues), /FAIL/);
+  }
+  for (const type of ['aws_apigatewayv2_integration', 'aws_apigatewayv2_route']) {
+    const result = mapped(type, ['create'], null, { ...apiValues[type], id: null });
+    assert.ok(result.issues.some(i => i.includes('child ID')));
+    assert.ok(result.requirements.some(r => r.action === 'apigateway:POST')); // Known collection; post-create read still unverified.
+  }
+});
+
+test('API Gateway and Lambda permission variants and unknown function scopes stay unsupported', () => {
+  for (const [type, extra] of [['aws_apigatewayv2_api', { protocol_type: 'WEBSOCKET' }],
+    ['aws_apigatewayv2_api', { tags_all: { lab: 'test' } }],
+    ['aws_apigatewayv2_integration', { credentials_arn: executionRole }],
+    ['aws_apigatewayv2_integration', { integration_type: 'HTTP_PROXY' }],
+    ['aws_apigatewayv2_route', { authorization_type: 'CUSTOM' }],
+    ['aws_apigatewayv2_stage', { access_log_settings: [{}] }],
+    ['aws_lambda_permission', { qualifier: 'live' }],
+    ['aws_lambda_permission', { principal: 's3.amazonaws.com' }],
+    ['aws_lambda_permission', { function_name: null }],
+    ['aws_lambda_permission', { function_name: 'arn:aws:lambda:us-east-1:999999999999:function:other' }]])
+    assert.ok(mapped(type, ['create'], null, { ...apiValues[type], ...extra }).issues.length, `${type} ${JSON.stringify(extra)}`);
+  const input = extendedPlan([resource('aws_apigatewayv2_api', ['create'], null, apiValues.aws_apigatewayv2_api)]);
+  input.configuration.root_module.resources[0].expressions.body = {};
+  assert.ok(requiredPermissions(input, backend).issues.some(i => i.includes('.body')));
+});
+
+test('new mappings identify denied management and Lambda authorization actions in summaries', async () => {
+  const input = extendedPlan(Object.entries(apiValues).map(([type, values]) => resource(type, ['create'], null, values)));
+  const mapping = requiredPermissions(input, backend);
+  assert.deepEqual(mapping.issues, []);
+  const results = await simulate(mapping.requirements, async (_service, _operation, request) => ({ EvaluationResults: [{
+    EvalActionName: request.ActionNames[0], EvalResourceName: request.ResourceArns[0],
+    EvalDecision: ['apigateway:POST', 'lambda:AddPermission'].includes(request.ActionNames[0]) ? 'implicitDeny' : 'allowed'
+  }] }));
+  assert.match(report(results, mapping.issues), /Missing or unverified actions: apigateway:POST, lambda:AddPermission/);
+  assert.match(report(results, mapping.issues), /FAIL/);
+  assert.match(report(results.map(r => ({ ...r, allowed: true })), mapping.issues), /PASS/);
+});
