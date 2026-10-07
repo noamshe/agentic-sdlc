@@ -62,6 +62,15 @@ export function changedLines(files: FileDiff[]): Set<string> {
   return lines;
 }
 
+export function inlineLocations(lines: Set<string>, secrets: string[]) {
+  return [...lines].map(location => {
+    const [path, line, side] = JSON.parse(location) as [string, number, 'LEFT' | 'RIGHT'];
+    return { path, line, side };
+  // A redacted path cannot be copied back as a valid GitHub location. Omit it;
+  // the model can still report the finding in the summary with a null location.
+  }).filter(location => redact(location.path, secrets) === location.path);
+}
+
 export function validateFindings(value: unknown, lines: Set<string>): Finding[] {
   // Diagnostics contain only fixed schema names, array indexes and rules.
   // Never include model values, unexpected field names, or PR/prompt content.
@@ -211,7 +220,8 @@ export async function main() {
   const lines = changedLines(files);
   const instructions = redact(`${globalRules}\n\n${reviewerRules}`, secrets);
   const input = JSON.stringify({ metadata: { number, title: redact(pr.title, secrets), description: redact(pr.body ?? '', secrets),
-    base: redact(pr.base.ref, secrets), head: redact(pr.head.ref, secrets), commit: pr.head.sha }, diff: redact(diff, secrets) });
+    base: redact(pr.base.ref, secrets), head: redact(pr.head.ref, secrets), commit: pr.head.sha }, diff: redact(diff, secrets),
+    validInlineLocations: inlineLocations(lines, secrets) });
   if (input.length + instructions.length > 150_000) throw new Error('PR exceeds input limit; no partial approval');
   const provider: LlmProvider = new OpenAiProvider(apiKey, process.env.OPENAI_MODEL || 'gpt-4.1');
   const output = await provider.review(instructions, input);
