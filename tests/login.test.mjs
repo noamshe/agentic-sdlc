@@ -45,3 +45,25 @@ test('demo navigation opens the back office and returns to login without credent
   assert.ok(!/\b(?:src|href|action)\s*=\s*["']https?:/i.test(office.body));
   assert.equal((await handler({ rawPath: destination, requestContext: { http: { method: 'POST' } } })).statusCode, 404);
 });
+
+test('back office links to the five-stage workflow guide with return and logout navigation', async () => {
+  const get = path => handler({ rawPath: path, requestContext: { http: { method: 'GET' } } });
+  const office = await get('/back-office');
+  const path = office.body.match(/href="([^"]+)">How it works/)[1];
+  const guide = await get(path);
+  assert.equal(path, '/agentic-flow');
+  assert.equal(guide.statusCode, 200);
+  assert.equal(guide.headers['content-type'], 'text/html; charset=utf-8');
+  assert.equal(guide.headers['cache-control'], 'no-store');
+  assert.equal((guide.body.match(/class="number"/g) ?? []).length, 5);
+  for (const stage of ['Codex builds the idea', 'Open a pull request', 'Two checks, different jobs', 'A human merges to main', 'Terraform ships the change'])
+    assert.ok(guide.body.includes(stage));
+  assert.match(guide.body, /No infra file changes\? The permission workflow is skipped/);
+  assert.match(guide.body, /href="\/agentic-flow" aria-current="page"/);
+  for (const [label, destination] of [['Back office', '/back-office'], ['Log out', '/login']]) {
+    const href = guide.body.match(new RegExp(`href="([^"]+)">${label}`))[1];
+    assert.equal(href, destination);
+    assert.equal((await get(href)).statusCode, 200);
+  }
+  assert.equal((await handler({ rawPath: path, requestContext: { http: { method: 'POST' } } })).statusCode, 404);
+});

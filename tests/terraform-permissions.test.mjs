@@ -230,7 +230,8 @@ test('workflow contains no apply, no PR write permission, and uses a read-only p
   assert.match(workflow, /github-terraform-plan-checker/);
   assert.ok(!workflow.includes('needs:'));
   assert.ok(!workflow.includes('pull_request_target'));
-  assert.match(workflow, /paths:\s*\n\s*- 'infra\/\*\*'\s*\n\s*- 'src\/lambdas\/\*\*'/);
+  assert.match(workflow, /paths:\s*\n\s*- 'infra\/\*\*'/);
+  assert.ok(!workflow.includes("'src/lambdas/**'"), 'application-only changes skip permission checking');
   const deployment = readFileSync('.github/workflows/terraform-deploy.yml', 'utf8');
   assert.match(deployment, /paths:\s*\n\s*- 'infra\/\*\*'\s*\n\s*- 'src\/lambdas\/\*\*'/);
   assert.match(deployment, /github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/);
