@@ -63,23 +63,43 @@ export function changedLines(files: FileDiff[]): Set<string> {
 }
 
 export function validateFindings(value: unknown, lines: Set<string>): Finding[] {
-  const bad = () => { throw new Error('Invalid review findings'); };
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return bad();
+  // Diagnostics contain only fixed schema names, array indexes and rules.
+  // Never include model values, unexpected field names, or PR/prompt content.
+  const bad = (path: string, reason: string): never => { throw new Error(`Invalid review findings: ${path}: ${reason}`); };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return bad('response', 'expected an object');
   const root = value as Record<string, unknown>;
-  if (Object.keys(root).join() !== 'findings' || !Array.isArray(root.findings) || root.findings.length > 20) return bad();
+  if (!Object.hasOwn(root, 'findings')) return bad('response', 'missing required field findings');
+  if (Object.keys(root).join() !== 'findings') return bad('response', 'unexpected fields');
+  if (!Array.isArray(root.findings)) return bad('findings', 'expected an array');
+  if (root.findings.length > 20) return bad('findings', 'exceeds maximum of 20 items');
   const seen = new Set<string>();
-  for (const item of root.findings) {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return bad();
+  for (const [index, item] of root.findings.entries()) {
+    const path = `findings[${index}]`;
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return bad(path, 'expected an object');
     const f = item as Finding;
-    if (Object.keys(f).sort().join() !== 'body,line,path,severity,side,title' || !severities.includes(f.severity)) return bad();
-    for (const [text, max] of [[f.title, 200], [f.body, 2000]] as const)
-      if (typeof text !== 'string' || !text.trim() || text.length > max || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(text)) return bad();
+    const fields = ['severity', 'title', 'body', 'path', 'line', 'side'] as const;
+    const missing = fields.filter(field => !Object.hasOwn(f, field));
+    if (missing.length) return bad(path, `missing required fields: ${missing.join(', ')}`);
+    if (Object.keys(f).sort().join() !== 'body,line,path,severity,side,title') return bad(path, 'unexpected fields');
+    if (!severities.includes(f.severity)) return bad(`${path}.severity`, 'expected BLOCKER, HIGH, MEDIUM or LOW');
+    for (const [field, max] of [['title', 200], ['body', 2000]] as const) {
+      const text = f[field];
+      if (typeof text !== 'string') return bad(`${path}.${field}`, 'expected a string');
+      if (!text.trim()) return bad(`${path}.${field}`, 'must not be blank');
+      if (text.length > max) return bad(`${path}.${field}`, `exceeds maximum of ${max} characters`);
+      if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(text)) return bad(`${path}.${field}`, 'contains forbidden control characters');
+    }
     const location = JSON.stringify([f.path, f.line, f.side]);
-    if (!(f.path === null && f.line === null && f.side === null) &&
-        !(typeof f.path === 'string' && Number.isSafeInteger(f.line) && (f.line ?? 0) > 0 &&
-          (f.side === 'LEFT' || f.side === 'RIGHT') && lines.has(location))) return bad();
+    if (!(f.path === null && f.line === null && f.side === null)) {
+      if (f.path === null || f.line === null || f.side === null)
+        return bad(path, 'path, line and side must all be null or form a complete inline location');
+      if (typeof f.path !== 'string') return bad(`${path}.path`, 'expected a string for an inline location');
+      if (!Number.isSafeInteger(f.line) || (f.line ?? 0) <= 0) return bad(`${path}.line`, 'expected a positive safe integer');
+      if (f.side !== 'LEFT' && f.side !== 'RIGHT') return bad(`${path}.side`, 'expected LEFT or RIGHT');
+      if (!lines.has(location)) return bad(path, 'inline location does not match a changed line in the PR diff');
+    }
     const key = JSON.stringify(f);
-    if (seen.has(key)) return bad();
+    if (seen.has(key)) return bad(path, 'duplicate finding');
     seen.add(key);
   }
   return (root.findings as Finding[]).sort((a, b) => severities.indexOf(a.severity) - severities.indexOf(b.severity));
