@@ -11,7 +11,21 @@ export const createHandler = invokeInner => async () => {
   // A synchronous invocation can return HTTP 200 even when the function failed.
   if (result.StatusCode !== 200 || result.FunctionError)
     throw new Error('Inner Lambda invocation failed');
-  return { message };
+  let inner;
+  try {
+    if (!(result.Payload instanceof Uint8Array)) throw new Error();
+    inner = JSON.parse(Buffer.from(result.Payload).toString('utf8'));
+  } catch {
+    throw new Error('Inner Lambda returned an invalid response');
+  }
+  if (!inner || typeof inner.message !== 'string' || !inner.message.trim())
+    throw new Error('Inner Lambda returned an invalid response');
+  return {
+    statusCode: 200,
+    headers: { 'content-type': 'text/plain; charset=utf-8' },
+    body: `${message}\n${inner.message}`,
+    isBase64Encoded: false
+  };
 };
 
 export const handler = createHandler(async request => {
