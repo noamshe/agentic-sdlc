@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · Agentic SDLC Lab</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #17213b; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 32px 20px; background: radial-gradient(ellipse at 15% 10%, #e4e3ff, transparent 55%), radial-gradient(ellipse at 90% 90%, #dceef5, transparent 50%), #f5f7fc; }
+    main { width: min(960px, 100%); display: grid; grid-template-columns: 1fr 1fr; border: 1px solid #ffffff; border-radius: 28px; overflow: hidden; background: #fff; box-shadow: 0 24px 80px #20264a18; }
+    .intro { display: flex; flex-direction: column; justify-content: space-between; gap: 72px; padding: 48px; color: #fff; background: radial-gradient(circle at 0 100%, #5b53b2, transparent 65%), #202442; }
+    .brand { display: flex; align-items: center; gap: 12px; font-size: 14px; font-weight: 650; letter-spacing: .02em; }
+    .mark { display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid #ffffff40; border-radius: 10px; color: #d4d0ff; font-family: monospace; font-size: 18px; }
+    .eyebrow { color: #b9b5ef; text-transform: uppercase; font-size: 11px; font-weight: 650; letter-spacing: .15em; }
+    h1 { margin: 16px 0; font-size: clamp(32px, 4vw, 42px); line-height: 1.15; letter-spacing: -.045em; font-weight: 650; }
+    .intro p { color: #ced0e2; font-size: 15px; line-height: 1.7; max-width: 300px; }
+    .status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #ced0e2; }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: #b2acf9; }
+    .login { padding: 64px 48px; align-self: center; }
+    h2 { font-size: 28px; font-weight: 650; letter-spacing: -.04em; margin: 0 0 8px; }
+    .subtitle { margin: 0 0 32px; color: #727a8e; font-size: 14px; line-height: 1.6; }
+    label { display: block; margin-bottom: 8px; font-size: 13px; font-weight: 600; }
+    input { width: 100%; min-height: 48px; padding: 13px 15px; border: 1px solid #dce0e9; border-radius: 10px; background: #fbfcfe; color: #17213b; font: inherit; font-size: 14px; transition: border-color .15s, box-shadow .15s; }
+    input::placeholder { color: #9298a7; }
+    input:focus-visible { outline: none; border-color: #7568df; box-shadow: 0 0 0 3px #7568df20; }
+    .field { margin-bottom: 20px; }
+    button { width: 100%; min-height: 48px; margin-top: 8px; border: 0; border-radius: 10px; background: #6554cf; color: #fff; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; box-shadow: 0 6px 16px #6554cf25; transition: background .15s, transform .15s; }
+    button:hover { background: #5442bd; }
+    button:active { transform: translateY(1px); }
+    button:focus-visible { outline: 3px solid #b9b0f0; outline-offset: 3px; }
+    .notice { margin: 22px 0 0; padding: 12px 14px; border: 1px solid #eeedf6; border-radius: 10px; background: #f8f7fc; color: #73718b; font-size: 12px; line-height: 1.6; }
+    @media (max-width: 680px) { main { grid-template-columns: 1fr; max-width: 440px; } .intro { gap: 28px; padding: 30px; } .intro p, .status { display: none; } h1 { font-size: 30px; margin-bottom: 0; } .login { padding: 32px 30px; } }
+    @media (prefers-reduced-motion: reduce) { input, button { transition: none; } }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="intro" aria-labelledby="lab-title">
+      <div class="brand"><span class="mark" aria-hidden="true">&gt;_</span> Agentic SDLC Lab</div>
+      <div>
+        <span class="eyebrow">Your next chapter</span>
+        <h1 id="lab-title">Build something<br>worth shipping.</h1>
+        <p>A space to experiment, learn, and turn your next idea into something real.</p>
+      </div>
+      <div class="status"><span class="dot" aria-hidden="true"></span> Small steps. Working software.</div>
+    </section>
+    <section class="login" aria-labelledby="login-title">
+      <h2 id="login-title">Welcome back</h2>
+      <p class="subtitle">Make yourself at home.</p>
+      <div class="field">
+        <label for="username">Username</label>
+        <input id="username" type="text" autocomplete="username" placeholder="Enter your username" aria-describedby="preview-notice">
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" type="password" autocomplete="current-password" placeholder="Enter your password" aria-describedby="preview-notice">
+      </div>
+      <button type="button" aria-describedby="preview-notice">Sign in</button>
+      <p class="notice" id="preview-notice">Preview only. The Sign in button has no action yet. Nothing you enter is submitted.</p>
+    </section>
+  </main>
+</body>
+</html>

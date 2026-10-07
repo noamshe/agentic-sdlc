@@ -1,5 +1,22 @@
 # Lab Lambda call chain
 
+## Login page
+
+`GET /login` serves a responsive login preview from the dedicated
+`agentic-sdlc-lab-login` Lambda. Its `login/index.mjs` entry point exports
+`login/routes.mjs`, which calls `login/handlers/login.mjs` to serve the packaged
+`login/page.html`. Username and password fields are labelled; the Sign in button
+does nothing, and no credentials are submitted or stored. There is no
+authentication implementation yet.
+
+`infra/login-lambda.tf` defines directory packaging, the function, its dedicated
+execution role, and a log group with one-day retention. Runtime permissions are
+limited to writing that function's log streams. `infra/api.tf` adds the HTTP API
+integration, explicit `GET /login` route, route-scoped invocation permission,
+and `login_url` output. The existing API and default stage are reused.
+
+## Hello endpoint
+
 `GET /hello` invokes `agentic-sdlc-lab-hello`. It logs
 `Hello from the Agentic SDLC lab.` and synchronously invokes
 `new-inner-lambda-test`, which logs `hello from new lambda`.

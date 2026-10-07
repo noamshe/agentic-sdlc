@@ -37,3 +37,32 @@ output "hello_url" {
   description = "Public GET endpoint for the lab Lambda."
   value       = "${aws_apigatewayv2_api.lab.api_endpoint}/hello"
 }
+
+resource "aws_apigatewayv2_integration" "login_lambda" {
+  api_id                 = aws_apigatewayv2_api.lab.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.login.invoke_arn
+  integration_method     = "POST"
+  payload_format_version = "2.0"
+}
+
+# GET /login -> login_lambda integration -> aws_lambda_function.login.
+resource "aws_apigatewayv2_route" "login" {
+  api_id             = aws_apigatewayv2_api.lab.id
+  route_key          = "GET /login"
+  authorization_type = "NONE"
+  target             = "integrations/${aws_apigatewayv2_integration.login_lambda.id}"
+}
+
+resource "aws_lambda_permission" "login_api" {
+  statement_id  = "AllowLoginHttpApi"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.login.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.lab.execution_arn}/${aws_apigatewayv2_stage.lab.name}/GET/login"
+}
+
+output "login_url" {
+  description = "Public login page endpoint."
+  value       = "${aws_apigatewayv2_api.lab.api_endpoint}/login"
+}
