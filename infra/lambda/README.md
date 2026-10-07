@@ -1,7 +1,22 @@
-# Minimal lab Lambda
+# Lab Lambda call chain
 
-`index.mjs` returns a fixed greeting. The archive provider packages it during Terraform planning; `function.zip` is generated locally and excluded from Git.
+`GET /hello` invokes `agentic-sdlc-lab-hello`. It logs
+`Hello from the Agentic SDLC lab.` and synchronously invokes
+`new-inner-lambda-test`, which logs `hello from new lambda`.
+Each greeting appears in its function's own CloudWatch log group. The HTTP
+response remains `{ "message": "Hello from the Agentic SDLC lab." }`.
 
-`../lambda.tf` defines a Node.js 24 ARM64 function with 128 MB memory and a three-second timeout, a dedicated execution role, and a log group retaining logs for one day. Its execution policy only allows creating streams and writing events in that log group. There is no API Gateway, public function URL, event source, scheduled invocation, VPC, or provisioned concurrency.
+The outer function fails if invocation is denied, times out, or the inner function
+reports an error, rather than returning a successful greeting for a failed chain.
+It uses the AWS SDK v3 included in the Node.js Lambda runtime and execution-role
+credentials. This minimal lab package does not pin/bundle the SDK version.
 
-This change is intended to exercise the existing permission check without changing the GitHub deployer/checker roles. The current checker supports only S3 and fails on unmapped Lambda, IAM, CloudWatch, and archive resources; it cannot currently identify their missing deployment actions. A future deployment would require the deployer to have the appropriate Lambda, IAM (including PassRole), and logging permissions. This PR does not grant them or authorize deployment.
+Both functions use Node.js 24, ARM64 and 128 MB memory. The outer timeout is ten
+seconds; the inner timeout is three seconds. Both log groups retain logs for one
+day. Each execution role can write only to its own log group; only the outer
+role may invoke the specific inner function. The inner function has no public
+endpoint and no permission to invoke the outer function.
+
+Terraform packages each source file into a generated, Git-ignored ZIP. The
+deployer/checker roles, permission checker, and GitHub workflows are unchanged.
+No AWS resources are deployed by local tests or validation.

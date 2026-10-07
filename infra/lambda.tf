@@ -49,12 +49,26 @@ resource "aws_lambda_function" "lab" {
   runtime          = "nodejs24.x"
   architectures    = ["arm64"]
   memory_size      = 128
-  timeout          = 3
+  timeout          = 10
 
   logging_config {
     log_format = "Text"
     log_group  = aws_cloudwatch_log_group.lab_lambda.name
   }
 
-  depends_on = [aws_iam_role_policy.lab_lambda_logs]
+  depends_on = [aws_iam_role_policy.lab_lambda_logs, aws_iam_role_policy.lab_lambda_invoke_inner]
+}
+
+resource "aws_iam_role_policy" "lab_lambda_invoke_inner" {
+  name = "invoke-new-inner-lambda-test"
+  role = aws_iam_role.lab_lambda.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = "lambda:InvokeFunction"
+      Resource = aws_lambda_function.inner.arn
+    }]
+  })
 }
