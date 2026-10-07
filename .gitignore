@@ -21,3 +21,4 @@ terraform.rc
 
 # Generated Lambda deployment package
 /infra/lambda/function.zip
+/infra/inner-lambda/function.zip
