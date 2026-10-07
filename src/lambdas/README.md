@@ -5,9 +5,13 @@
 `GET /login` serves a responsive login preview from the dedicated
 `agentic-sdlc-lab-login` Lambda. Its `login/index.mjs` entry point exports
 `login/routes.mjs`, which calls `login/handlers/login.mjs` to serve the packaged
-`login/page.html`. Username and password fields are labelled; the Sign in button
-does nothing, and no credentials are submitted or stored. There is no
-authentication implementation yet.
+`login/page.html`. Username and password fields are labelled and optional. Sign in navigates to
+`GET /back-office` without submitting or storing anything. The demo back office
+shows sample statistics and three packaged SVG illustrations; Log out returns
+to `/login`. Both pages are public demo pages with no authentication or session.
+The back office follows the same `index.mjs -> routes.mjs -> handlers/` structure
+and is packaged in the existing login Lambda, with its own explicit API Gateway
+GET route and route-scoped invocation permission.
 
 `infra/login-lambda.tf` defines directory packaging, the function, its dedicated
 execution role, and a log group with one-day retention. Runtime permissions are

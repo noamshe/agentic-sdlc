@@ -66,3 +66,19 @@ output "login_url" {
   description = "Public login page endpoint."
   value       = "${aws_apigatewayv2_api.lab.api_endpoint}/login"
 }
+
+# Demo back office uses the existing login Lambda package and integration.
+resource "aws_apigatewayv2_route" "back_office" {
+  api_id             = aws_apigatewayv2_api.lab.id
+  route_key          = "GET /back-office"
+  authorization_type = "NONE"
+  target             = "integrations/${aws_apigatewayv2_integration.login_lambda.id}"
+}
+
+resource "aws_lambda_permission" "back_office_api" {
+  statement_id  = "AllowBackOfficeHttpApi"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.login.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.lab.execution_arn}/${aws_apigatewayv2_stage.lab.name}/GET/back-office"
+}
