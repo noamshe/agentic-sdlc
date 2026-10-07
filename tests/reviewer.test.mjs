@@ -83,6 +83,37 @@ test('HTTP diagnostics retain status, provider code and message but exclude raw 
   assert.ok(!formatError(nonJson, []).includes('private proxy response'));
 });
 
+test('GitHub 422 diagnostics expose known nested validation rules and safe field/code labels', async () => {
+  const error = await httpError('GitHub review submission', Response.json({ message: 'Unprocessable Entity', errors: [
+    { resource: 'PullRequestReviewComment', field: 'line', code: 'invalid', value: 'private submitted value' },
+    { resource: 'PullRequestReview', code: 'custom', message: 'Review comments is invalid' },
+    'Pull request review thread line must be part of the diff',
+    "Pull request review thread diff hunk can't be blank"
+  ] }, { status: 422 }));
+  const diagnostic = formatError(error, []);
+  assert.match(diagnostic, /GitHub review submission HTTP 422/);
+  assert.match(diagnostic, /errors\[0\]: resource: PullRequestReviewComment, field: line, code: invalid/);
+  assert.match(diagnostic, /inline review comments or threads are invalid/);
+  assert.match(diagnostic, /inline line must be part of the diff/);
+  assert.match(diagnostic, /inline diff hunk cannot be blank/);
+  assert.ok(!diagnostic.includes('private submitted value'));
+});
+
+test('GitHub nested diagnostics omit unknown messages, values, labels and secret-bearing content', async () => {
+  const sensitive = 'private prompt text sk-example-secret ghp_exampletoken';
+  const error = await httpError('GitHub', Response.json({ message: 'Validation Failed', errors: [
+    { resource: sensitive, field: sensitive, code: sensitive, message: sensitive, value: sensitive },
+    sensitive, { message: `Review comments is invalid: ${sensitive}` }, null,
+    { field: 'body', code: 'missing_field' }, { message: sensitive }
+  ], request: sensitive }, { status: 422 }));
+  const diagnostic = formatError(error, []); // Safe even with no known-secret list.
+  for (const text of [sensitive, 'private prompt text', 'sk-example-secret', 'ghp_exampletoken']) assert.ok(!diagnostic.includes(text));
+  assert.match(diagnostic, /unrecognized \(withheld\)/);
+  assert.match(diagnostic, /custom validation message withheld/);
+  assert.match(diagnostic, /field: body, code: missing_field/);
+  assert.match(diagnostic, /additional validation errors omitted/);
+});
+
 test('error messages, codes and causes are sanitized before logging', () => {
   const secret = 'private/value"withquote';
   const error = Object.assign(new Error(`failed ${secret}\n${encodeURIComponent(secret)}`), {
@@ -151,7 +182,7 @@ test('validation diagnostics never echo untrusted values, field names or sensiti
   }
 });
 
-test('invalid model findings fail closed before publishing any GitHub review', async t => {
+test('invalid findings and GitHub validation rejections fail closed without approval fallbacks', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'review-validation-'));
   const eventPath = join(directory, 'event.json');
   const pr = { number: 1, state: 'open', draft: false, changed_files: 1, title: 'private PR title', body: 'private prompt content',
@@ -161,6 +192,7 @@ test('invalid model findings fail closed before publishing any GitHub review', a
   const previous = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
   let githubWrites = 0;
   let modelFinding = { ...finding, severity: 'private prompt content' };
+  let rejectReview = false;
   t.mock.method(globalThis, 'fetch', async (url, options) => {
     if (String(url).startsWith('https://api.openai.com/')) {
       const request = JSON.parse(options.body);
@@ -172,7 +204,19 @@ test('invalid model findings fail closed before publishing any GitHub review', a
       return Response.json({ status: 'completed',
         output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify({ findings: [modelFinding] }) }] }] });
     }
-    if (options.method !== 'GET') { githubWrites++; throw new Error('Unexpected GitHub write'); }
+    if (options.method !== 'GET') {
+      githubWrites++;
+      if (!rejectReview) throw new Error('Unexpected GitHub write');
+      assert.ok(String(url).endsWith('/reviews'));
+      const review = JSON.parse(options.body);
+      assert.equal(review.commit_id, pr.head.sha);
+      assert.equal(review.event, 'REQUEST_CHANGES');
+      assert.equal(review.comments[0].line, 10);
+      assert.equal(review.comments[0].side, 'RIGHT');
+      return Response.json({ message: 'Unprocessable Entity', errors: [
+        { resource: 'PullRequestReview', code: 'custom', message: 'Review comments is invalid' }
+      ] }, { status: 422 });
+    }
     if (String(url).includes('/files?')) return Response.json([{ filename: 'app.ts',
       patch: '@@ -10,2 +10,2 @@\n-old\n+new\n context', additions: 1, deletions: 1 }]);
     if (options.headers.Accept.includes('diff')) return new Response('PR diff');
@@ -190,6 +234,13 @@ test('invalid model findings fail closed before publishing any GitHub review', a
     modelFinding = { ...finding, line: 11 };
     await assert.rejects(main(), /inline location does not match a changed line in the PR diff/);
     assert.equal(githubWrites, 0);
+    modelFinding = finding;
+    rejectReview = true;
+    await assert.rejects(main(), error => {
+      assert.match(formatError(error), /GitHub review submission HTTP 422.*inline review comments or threads are invalid/);
+      return true;
+    });
+    assert.equal(githubWrites, 1); // No retries, summary-only fallback, or clean approval.
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
